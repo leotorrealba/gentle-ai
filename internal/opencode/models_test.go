@@ -158,6 +158,16 @@ func TestLoadModelsFileNotFound(t *testing.T) {
 	}
 }
 
+func TestLoadModelsOrEmptyFileNotFound(t *testing.T) {
+	providers, err := LoadModelsOrEmpty("/nonexistent/models.json")
+	if err != nil {
+		t.Fatalf("LoadModelsOrEmpty() error = %v", err)
+	}
+	if len(providers) != 0 {
+		t.Fatalf("providers = %v, want empty map", providers)
+	}
+}
+
 func withAuthFixture(t *testing.T, providers map[string]bool) func() {
 	t.Helper()
 	path := writeAuthFixture(t, providers)

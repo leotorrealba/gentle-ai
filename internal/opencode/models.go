@@ -94,6 +94,19 @@ func LoadModels(cachePath string) (map[string]Provider, error) {
 	return providers, nil
 }
 
+// LoadModelsOrEmpty parses the OpenCode models cache when it exists and falls
+// back to an empty provider set when OpenCode has not populated the cache yet.
+func LoadModelsOrEmpty(cachePath string) (map[string]Provider, error) {
+	providers, err := LoadModels(cachePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]Provider{}, nil
+		}
+		return nil, err
+	}
+	return providers, nil
+}
+
 // loadAuthProviders reads the OpenCode auth.json and returns authenticated provider IDs.
 func loadAuthProviders(authPath string) map[string]bool {
 	data, err := os.ReadFile(authPath)

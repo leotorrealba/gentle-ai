@@ -1574,20 +1574,12 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 			m.Selection.SDDMode = options[m.Cursor]
 			if m.Selection.SDDMode == model.SDDModeMulti {
 				cachePath := opencode.DefaultCachePath()
-				if _, err := osStatModelCache(cachePath); err == nil {
-					// Cache exists — OpenCode has been run at least once.
-					// Show the model picker so the user can assign models.
-					m.ModelPicker = screens.NewModelPickerState(cachePath, opencode.DefaultSettingsPath())
-					m.Selection.ModelAssignments = nil
-					m.setScreen(ScreenModelPicker)
-					return m, nil
-				}
-				// Cache missing — OpenCode hasn't been run yet on this machine.
-				// Skip the model picker; models will use OpenCode defaults.
-				// The picker empty-state message explains what to do after install.
-				m.ModelPicker = screens.ModelPickerState{}
+				m.ModelPicker = screens.NewModelPickerState(cachePath, opencode.DefaultSettingsPath())
+				m.Selection.ModelAssignments = nil
+				m.setScreen(ScreenModelPicker)
+				return m, nil
 			}
-			// Clear assignments for both single mode and multi-no-cache paths.
+			// Clear assignments for single mode.
 			m.Selection.ModelAssignments = nil
 			// Show StrictTDD screen when OpenCode + SDD are selected.
 			// This is the next step before the dependency tree.
@@ -1631,16 +1623,33 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 			}
 		}
 	case ScreenModelPicker:
-		// When no providers are detected the screen only shows a "Back" option
-		// at cursor 0.  Handle that before the normal row logic.
+		// When no providers are detected the screen offers Continue with defaults
+		// and Back. Handle that before the normal row logic.
 		if len(m.ModelPicker.AvailableIDs) == 0 {
-			if m.ModelConfigMode {
+			if m.ModelConfigMode || m.Cursor == 1 {
 				m.ModelConfigMode = false
 				m.setScreen(ScreenModelConfig)
 				return m, nil
 			}
-			// Go back to SDD mode so the user can switch to single mode.
-			m.setScreen(ScreenSDDMode)
+			// Continue with OpenCode defaults when no providers are available yet.
+			if m.Selection.Preset == model.PresetCustom {
+				if m.shouldShowStrictTDDScreen() {
+					m.setScreen(ScreenStrictTDD)
+				} else if m.shouldShowSkillPickerScreen() {
+					if len(m.SkillPicker) == 0 {
+						m.initSkillPicker()
+					}
+					m.setScreen(ScreenSkillPicker)
+				} else {
+					m.Review = planner.BuildReviewPayload(m.Selection, m.DependencyPlan)
+					m.setScreen(ScreenReview)
+				}
+			} else if m.shouldShowStrictTDDScreen() {
+				m.setScreen(ScreenStrictTDD)
+			} else {
+				m.buildDependencyPlan()
+				m.setScreen(ScreenDependencyTree)
+			}
 			return m, nil
 		}
 		rows := screens.ModelPickerRows()
@@ -2732,7 +2741,7 @@ func (m Model) optionCount() int {
 		return 1
 	case ScreenModelPicker:
 		if len(m.ModelPicker.AvailableIDs) == 0 {
-			return 1 // only "Back to SDD mode"
+			return 2 // Continue with defaults + Back to SDD mode
 		}
 		return len(screens.ModelPickerRows()) + 2 // rows + Continue + Back
 	case ScreenDependencyTree:

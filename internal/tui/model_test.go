@@ -763,16 +763,13 @@ func sddMultiCursor(t *testing.T) int {
 	return -1
 }
 
-// TestSDDModeMultiSkipModelPickerWhenCacheMissing verifies that when SDDModeMulti
-// is selected and the OpenCode model cache does NOT exist on disk, the TUI skips
-// the model picker and goes to ScreenStrictTDD (the new next step after SDDMode).
-// This is the "fresh install" path where OpenCode has not been run yet.
-func TestSDDModeMultiSkipModelPickerWhenCacheMissing(t *testing.T) {
-	origStat := osStatModelCache
-	osStatModelCache = func(name string) (os.FileInfo, error) {
-		return nil, os.ErrNotExist
-	}
-	t.Cleanup(func() { osStatModelCache = origStat })
+// TestSDDModeMultiShowsModelPickerWhenCacheMissing verifies that selecting
+// SDDModeMulti still opens the model picker when the OpenCode model cache has
+// not been populated yet. The picker can still load custom providers from
+// opencode.json and otherwise shows its explicit empty state instead of silently
+// skipping model assignment.
+func TestSDDModeMultiShowsModelPickerWhenCacheMissing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 
 	m := NewModel(system.DetectionResult{}, "dev")
 	m.Screen = ScreenSDDMode
@@ -783,12 +780,38 @@ func TestSDDModeMultiSkipModelPickerWhenCacheMissing(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	state := updated.(Model)
 
-	// New flow: SDDMode → ScreenStrictTDD (cache missing → skip model picker, then ask strict TDD)
-	if state.Screen != ScreenStrictTDD {
-		t.Fatalf("screen = %v, want ScreenStrictTDD (cache missing → skip model picker, show strict TDD)", state.Screen)
+	if state.Screen != ScreenModelPicker {
+		t.Fatalf("screen = %v, want ScreenModelPicker (cache missing → still offer model picker)", state.Screen)
 	}
 	if len(state.ModelPicker.AvailableIDs) != 0 {
 		t.Fatalf("ModelPicker.AvailableIDs should be empty when cache missing, got: %v", state.ModelPicker.AvailableIDs)
+	}
+}
+
+func TestSDDModeMultiEmptyModelPickerCanContinueWithDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	m := NewModel(system.DetectionResult{}, "dev")
+	m.Screen = ScreenSDDMode
+	m.Selection.Agents = []model.AgentID{model.AgentOpenCode}
+	m.Selection.Components = []model.ComponentID{model.ComponentEngram, model.ComponentSDD}
+	m.Cursor = sddMultiCursor(t)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	state := updated.(Model)
+	if state.Screen != ScreenModelPicker {
+		t.Fatalf("screen = %v, want ScreenModelPicker", state.Screen)
+	}
+
+	state.Cursor = 0 // Continue with defaults
+	updated, _ = state.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	state = updated.(Model)
+
+	if state.Screen != ScreenStrictTDD {
+		t.Fatalf("screen = %v, want ScreenStrictTDD after continuing with defaults", state.Screen)
+	}
+	if state.Selection.ModelAssignments != nil {
+		t.Fatalf("ModelAssignments = %v, want nil defaults", state.Selection.ModelAssignments)
 	}
 }
 

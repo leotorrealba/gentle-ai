@@ -71,7 +71,7 @@ type ModelPickerState struct {
 // NewModelPickerState initializes the picker state from the models cache,
 // merging any custom providers defined in the OpenCode settings file.
 func NewModelPickerState(cachePath string, settingsPath string) ModelPickerState {
-	providers, err := opencode.LoadModels(cachePath)
+	providers, err := opencode.LoadModelsOrEmpty(cachePath)
 	if err != nil {
 		return ModelPickerState{}
 	}
@@ -478,9 +478,9 @@ func renderPhaseList(
 		b.WriteString("\n")
 		b.WriteString(styles.SubtextStyle.Render("Using default model assignments for now."))
 		b.WriteString("\n\n")
-		b.WriteString(renderOptions([]string{"← Back to SDD mode"}, cursor))
+		b.WriteString(renderOptions([]string{"Continue with defaults", "← Back to SDD mode"}, cursor))
 		b.WriteString("\n")
-		b.WriteString(styles.HelpStyle.Render("enter/esc: go back"))
+		b.WriteString(styles.HelpStyle.Render("enter: confirm • esc: back"))
 		return b.String()
 	}
 
