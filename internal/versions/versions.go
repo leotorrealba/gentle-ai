@@ -17,7 +17,7 @@ const OpenCode = "1.14.48"
 const QwenCode = "0.15.10"
 
 // renovate: datasource=npm depName=@openai/codex
-const Codex = "0.130.0"
+const Codex = "0.137.0"
 
 // renovate: datasource=npm depName=@google/gemini-cli
 const GeminiCLI = "0.41.2"
