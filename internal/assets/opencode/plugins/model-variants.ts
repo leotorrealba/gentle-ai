@@ -54,7 +54,7 @@ export const ModelVariantsPlugin: Plugin = async (input) => {
 
       // Always write through a per-invocation tmp file before renaming, so
       // readers never see partial JSON and concurrent plugin loads do not
-      // race over the same tmp path. See issue #766.
+      // race over the same tmp path. See issues #766 and #786.
       const finalPath = path.join(cacheDir, MODEL_VARIANTS_CACHE_FILE)
       tmpPath = path.join(cacheDir, `${MODEL_VARIANTS_CACHE_FILE}.${randomBytes(3).toString("hex")}.tmp`)
       await writeFile(tmpPath, JSON.stringify(variants, null, 2))
