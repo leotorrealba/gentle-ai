@@ -1245,7 +1245,7 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 				if skills.IsSDDSkill(skillID) {
 					continue
 				}
-				path := skills.SkillPathForAgent(homeDir, adapter, skillID)
+				path := skills.SkillPathForAgent(targetDir, adapter, skillID)
 				if path != "" {
 					paths = append(paths, path)
 				}

@@ -2217,3 +2217,69 @@ func TestRunInstallKimiAlreadyInstalledDoesNotRequireUV(t *testing.T) {
 		t.Fatalf("expected no install commands when Kimi is already installed, got: %v", got)
 	}
 }
+
+// TestRunInstallWorkspaceScopeVerification verifies the user-visible 'install --scope=workspace'
+// behavior from issue #785. It ensures that when installing with workspace scope:
+// 1. Verification files are written to the workspace directory, NOT the home directory.
+// 2. Post-apply verification succeeds because it checks the workspace skill paths.
+func TestRunInstallWorkspaceScopeVerification(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+
+	originalCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get current wd: %v", err)
+	}
+
+	restoreHome := osUserHomeDir
+	restoreCommand := runCommand
+	restoreLookPath := cmdLookPath
+	t.Cleanup(func() {
+		osUserHomeDir = restoreHome
+		runCommand = restoreCommand
+		cmdLookPath = restoreLookPath
+		if err := os.Chdir(originalCwd); err != nil {
+			t.Errorf("failed to restore working directory: %v", err)
+		}
+	})
+
+	osUserHomeDir = func() (string, error) { return home, nil }
+	runCommand = func(string, ...string) error { return nil }
+	cmdLookPath = func(name string) (string, error) {
+		return "/usr/local/bin/" + name, nil
+	}
+
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("failed to change working directory to temp workspace: %v", err)
+	}
+
+	// Run install with workspace scope, installing Claude Code agent and skills component
+	args := []string{
+		"--scope", "workspace",
+		"--agent", "claude-code",
+		"--component", "skills",
+		"--preset", "custom",
+		"--skill", "go-testing,branch-pr",
+	}
+
+	result, err := RunInstall(args, system.DetectionResult{})
+	if err != nil {
+		t.Fatalf("RunInstall() error = %v", err)
+	}
+
+	if !result.Verify.Ready {
+		t.Fatalf("post-apply verification failed, report = %#v", result.Verify)
+	}
+
+	// Assert that skill files were written to the workspace directory.
+	expectedWorkspaceSkillFile := filepath.Join(workspace, ".claude", "skills", "go-testing", "SKILL.md")
+	if _, err := os.Stat(expectedWorkspaceSkillFile); err != nil {
+		t.Errorf("expected skill file in workspace %q, but was missing: %v", expectedWorkspaceSkillFile, err)
+	}
+
+	// Assert that no skill files were written to the home directory.
+	unexpectedHomeSkillFile := filepath.Join(home, ".claude", "skills", "go-testing", "SKILL.md")
+	if _, err := os.Stat(unexpectedHomeSkillFile); err == nil {
+		t.Errorf("unexpected skill file found in home directory: %q", unexpectedHomeSkillFile)
+	}
+}
