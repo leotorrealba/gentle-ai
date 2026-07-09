@@ -422,6 +422,7 @@ func TestRequiredLedgerClauses(t *testing.T) {
 			assertTextContainsClauses(t, tc.name+" gentle-orchestrator prompt", prompt, requiredLedgerClauses)
 			assertTextContainsClauses(t, tc.name+" gentle-orchestrator prompt", prompt, []string{requiredOrchestratorMergeModeClause})
 			assertRenderedReviewRefuter(t, settingsPath)
+			assertRenderedOpenCodeReviewPrompts(t, settingsPath)
 		})
 	}
 
@@ -508,9 +509,10 @@ func TestReviewRefutersAreStructurallyReadOnly(t *testing.T) {
 				t.Fatalf("%s missing review-refuter definition", path)
 			}
 			tools, ok := refuter["tools"].(map[string]any)
-			if !ok || len(tools) != 1 || tools["read"] != true {
-				t.Fatalf("%s review-refuter tools = %#v, want read-only allowlist", path, tools)
+			if !ok {
+				t.Fatalf("%s review-refuter tools has type %T, want object", path, refuter["tools"])
 			}
+			assertOpenCodeRefuterToolsReadOnly(t, path, tools)
 			prompt, _ := refuter["prompt"].(string)
 			for _, clause := range []string{
 				"complete merged list of BLOCKER/CRITICAL candidates",
@@ -521,6 +523,22 @@ func TestReviewRefutersAreStructurallyReadOnly(t *testing.T) {
 					t.Errorf("%s review-refuter prompt missing %q", path, clause)
 				}
 			}
+		})
+	}
+}
+
+func TestOpenCodeOverlayReviewPromptsCarryLedgerContract(t *testing.T) {
+	for _, path := range []string{"opencode/sdd-overlay-single.json", "opencode/sdd-overlay-multi.json"} {
+		t.Run(path, func(t *testing.T) {
+			var root map[string]any
+			if err := json.Unmarshal([]byte(assets.MustRead(path)), &root); err != nil {
+				t.Fatalf("Unmarshal(%s) error = %v", path, err)
+			}
+			agentMap, ok := root["agent"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s missing agent map", path)
+			}
+			assertOpenCodeReviewAgentPrompts(t, path, agentMap)
 		})
 	}
 }
@@ -588,9 +606,10 @@ func assertRenderedReviewRefuter(t *testing.T, settingsPath string) {
 		t.Fatalf("%q missing rendered %s agent", settingsPath, reviewRefuterAgentName)
 	}
 	tools, ok := refuter["tools"].(map[string]any)
-	if !ok || len(tools) != 1 || tools["read"] != true {
-		t.Fatalf("%q rendered %s tools = %#v, want read-only allowlist", settingsPath, reviewRefuterAgentName, tools)
+	if !ok {
+		t.Fatalf("%q rendered %s tools has type %T, want object", settingsPath, reviewRefuterAgentName, refuter["tools"])
 	}
+	assertOpenCodeRefuterToolsReadOnly(t, settingsPath, tools)
 	orchestrator := agentMap["gentle-orchestrator"].(map[string]any)
 	permission := orchestrator["permission"].(map[string]any)
 	task := permission["task"].(map[string]any)
@@ -599,6 +618,88 @@ func assertRenderedReviewRefuter(t *testing.T, settingsPath string) {
 	}
 	if task[reviewRefuterAgentName] != "allow" {
 		t.Fatalf("%q gentle-orchestrator cannot invoke %s: %#v", settingsPath, reviewRefuterAgentName, task)
+	}
+}
+
+func assertOpenCodeRefuterToolsReadOnly(t *testing.T, label string, tools map[string]any) {
+	t.Helper()
+	want := map[string]bool{
+		"read":  true,
+		"write": false,
+		"edit":  false,
+		"bash":  false,
+		"task":  false,
+	}
+	if len(tools) != len(want) {
+		t.Fatalf("%s review-refuter tools = %#v, want explicit read-only overrides %#v", label, tools, want)
+	}
+	for tool, wantEnabled := range want {
+		got, ok := tools[tool].(bool)
+		if !ok || got != wantEnabled {
+			t.Errorf("%s review-refuter tool %q = %v, want %v", label, tool, tools[tool], wantEnabled)
+		}
+	}
+}
+
+func assertRenderedOpenCodeReviewPrompts(t *testing.T, settingsPath string) {
+	t.Helper()
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", settingsPath, err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatalf("Unmarshal(%q) error = %v", settingsPath, err)
+	}
+	agentMap, ok := root["agent"].(map[string]any)
+	if !ok {
+		t.Fatalf("%q missing agent map", settingsPath)
+	}
+	assertOpenCodeReviewAgentPrompts(t, settingsPath, agentMap)
+}
+
+func assertOpenCodeReviewAgentPrompts(t *testing.T, label string, agentMap map[string]any) {
+	t.Helper()
+	reviewAgents := map[string]struct {
+		idPrefix string
+		lens     string
+	}{
+		"review-risk":        {idPrefix: "R1-NNN", lens: "risk"},
+		"review-readability": {idPrefix: "R2-NNN", lens: "readability"},
+		"review-reliability": {idPrefix: "R3-NNN", lens: "reliability"},
+		"review-resilience":  {idPrefix: "R4-NNN", lens: "resilience"},
+	}
+	commonClauses := []string{
+		"Standard review: run exactly 1 exhaustive sweep of the diff per lens, then stop",
+		"run at most 2 sweeps per lens",
+		"There is no loop-until-dry mechanism; the sweep budget is the entire first pass",
+		"Report a finding only if it is a real, user-impacting defect you would defend with concrete evidence",
+		"When in doubt, stay silent: a missed nitpick costs nothing; a false positive costs a full fix cycle",
+		"Style and preference findings are banned unless they obscure a defect",
+		"location path/to/file.ext:line or :start-end",
+		"severity BLOCKER | CRITICAL | WARNING | SUGGESTION",
+		"status open | fixed | verified | refuted | wont-fix | info",
+		"evidence explaining the concrete defect and user impact",
+		"BLOCKER/CRITICAL findings use status open; WARNING/SUGGESTION findings use status info",
+		"deterministically merge candidates for batched per-finding refutation",
+		"If clean, say exactly: No findings.",
+	}
+	for agentName, expected := range reviewAgents {
+		agent, ok := agentMap[agentName].(map[string]any)
+		if !ok {
+			t.Errorf("%s missing %s agent", label, agentName)
+			continue
+		}
+		prompt, ok := agent["prompt"].(string)
+		if !ok {
+			t.Errorf("%s %s prompt has type %T, want string", label, agentName, agent["prompt"])
+			continue
+		}
+		assertTextContainsClauses(t, label+" "+agentName+" prompt", prompt, commonClauses)
+		assertTextContainsClauses(t, label+" "+agentName+" prompt", prompt, []string{
+			"stable id " + expected.idPrefix,
+			"lens " + expected.lens,
+		})
 	}
 }
 

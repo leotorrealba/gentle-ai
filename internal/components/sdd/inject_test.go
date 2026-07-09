@@ -2413,9 +2413,7 @@ func TestInjectOpenCodeEmptySDDModeDefaultsSingle(t *testing.T) {
 		}
 	}
 	refuterTools := agentMap["review-refuter"].(map[string]any)["tools"].(map[string]any)
-	if len(refuterTools) != 1 || refuterTools["read"] != true {
-		t.Fatalf("review-refuter tools = %#v, want read-only allowlist", refuterTools)
-	}
+	assertOpenCodeRefuterToolsReadOnly(t, "rendered single-mode OpenCode config", refuterTools)
 }
 
 func TestInjectClaudeIgnoresSDDMode(t *testing.T) {
