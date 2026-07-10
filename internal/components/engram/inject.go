@@ -174,6 +174,10 @@ type InjectOptions struct {
 	// Set to true only when the user explicitly opts in via a CLI flag or TUI choice.
 	CodexMultiAgent bool
 
+	// CodexOrchestratorAssignment updates top-level model settings when non-nil.
+	// nil preserves the user's existing main-session configuration.
+	CodexOrchestratorAssignment *model.CodexOrchestratorAssignment
+
 	// CodexCarrilModelAssignments holds the resolved carril→model-id map used
 	// when writing SDD profile .config.toml files. nil/empty = use canonical
 	// defaults (sdd-strong=gpt-5.6-sol, sdd-mid=gpt-5.6-terra, sdd-cheap=gpt-5.6-luna).
@@ -451,6 +455,10 @@ func injectWithOptions(configHomeDir, promptDir string, adapter agents.Adapter, 
 		// Step 2 — top-level instruction-file keys (before the first section header).
 		withInstr := filemerge.UpsertTopLevelTOMLString(withMaxDepth, "model_instructions_file", instructionsPath)
 		withCompact := filemerge.UpsertTopLevelTOMLString(withInstr, "experimental_compact_prompt_file", compactPath)
+		if opts.CodexOrchestratorAssignment != nil {
+			withCompact = filemerge.UpsertTopLevelTOMLString(withCompact, "model", opts.CodexOrchestratorAssignment.Model)
+			withCompact = filemerge.UpsertTopLevelTOMLString(withCompact, "model_reasoning_effort", string(opts.CodexOrchestratorAssignment.Effort))
+		}
 
 		// Step 3 — [mcp_servers.engram] block (always last; strip+re-append at EOF).
 		engramCmd := stableEngramCommandForMergedConfig(configPath, adapter.Agent())

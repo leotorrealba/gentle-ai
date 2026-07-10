@@ -21,6 +21,12 @@ type ModelAssignmentState struct {
 	Effort     string `json:"effort,omitempty"`
 }
 
+// CodexOrchestratorAssignmentState is the persisted main-session assignment.
+type CodexOrchestratorAssignmentState struct {
+	Model  string `json:"model"`
+	Effort string `json:"effort"`
+}
+
 // ClaudePhaseAssignmentState is the JSON-serialisable form of a Claude
 // subagent model+effort assignment. Empty Effort means Claude Code default.
 type ClaudePhaseAssignmentState struct {
@@ -51,6 +57,9 @@ type InstallState struct {
 	// (low|medium|high|xhigh). Persisted so that `gentle-ai sync` preserves the
 	// user's per-phase effort preset instead of falling back to Recommended.
 	CodexModelAssignments map[string]string `json:"codexModelAssignments,omitempty"`
+
+	// CodexOrchestratorAssignment is optional so legacy state preserves the user's top-level Codex configuration.
+	CodexOrchestratorAssignment *CodexOrchestratorAssignmentState `json:"codexOrchestratorAssignment,omitempty"`
 
 	// CodexCarrilModelAssignments maps the three carril profile names
 	// (sdd-strong|sdd-mid|sdd-cheap) to OpenAI subscription model IDs
@@ -146,6 +155,7 @@ func MergeAgents(existing InstallState, newAgents []string) InstallState {
 		ClaudePhaseAssignments:      existing.ClaudePhaseAssignments,
 		KiroModelAssignments:        existing.KiroModelAssignments,
 		CodexModelAssignments:       existing.CodexModelAssignments,
+		CodexOrchestratorAssignment: existing.CodexOrchestratorAssignment,
 		CodexCarrilModelAssignments: existing.CodexCarrilModelAssignments,
 		CodexPhaseModelAssignments:  existing.CodexPhaseModelAssignments,
 		Persona:                     existing.Persona,

@@ -206,6 +206,38 @@ func TestRunReviewResumeReemitsAuthoritativeStateAfterOutputFailures(t *testing.
 	}
 }
 
+func TestRunReviewStepAppendsLifecycleStateThroughAuthoritativeStore(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	policy := filepath.Join(t.TempDir(), "policy.md")
+	ledger := filepath.Join(t.TempDir(), "ledger.json")
+	if err := os.WriteFile(policy, []byte("policy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ledger, []byte("{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunReviewStart([]string{"--cwd", repo, "--lineage", "step-lineage", "--policy-file", policy}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	ledgerHash, err := reviewtransaction.HashLedgerArtifact(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(t.TempDir(), "freeze.json")
+	writeReviewCLIJSON(t, input, ReviewStepInput{Findings: []reviewtransaction.Finding{}, LedgerHash: ledgerHash})
+	var output bytes.Buffer
+	if err := RunReviewStep([]string{"--cwd", repo, "--lineage", "step-lineage", "--operation", "freeze-findings", "--input", input}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var result ReviewResumeResult
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Transaction.State != reviewtransaction.StateFindingsFrozen || result.StoreRevision == "" {
+		t.Fatalf("review step result = %#v", result)
+	}
+}
+
 type failingReviewWriter struct{}
 
 func (failingReviewWriter) Write([]byte) (int, error) {
@@ -433,10 +465,10 @@ func TestRunReviewValidateDerivesCurrentFactsAndDeniesWithJSON(t *testing.T) {
 	request.ExternalEvidence = reviewtransaction.ExternalEvidenceNone
 	writeReviewCLIJSON(t, requestPath, request)
 	output.Reset()
-	if err := RunReviewValidate([]string{"--cwd", repo, "--receipt", receiptPath, "--request", requestPath}, &output); err == nil {
-		t.Fatal("RunReviewValidate(nonexistent tree) returned process success")
+	if err := RunReviewValidate([]string{"--cwd", repo, "--receipt", receiptPath, "--request", requestPath}, &output); err != nil {
+		t.Fatalf("RunReviewValidate ignores historical target and derives current lifecycle state: %v", err)
 	}
-	assertReviewGateResult(t, output.Bytes(), reviewtransaction.GateInvalidated)
+	assertReviewGateResult(t, output.Bytes(), reviewtransaction.GateAllow)
 }
 
 func TestRunReviewValidateRejectsCallerSelectedForgedTerminalStore(t *testing.T) {
@@ -646,15 +678,15 @@ func TestRunReviewBundleExportImportRecoversCorrectedLineageInCleanClone(t *test
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git clone: %v: %s", err, output)
 	}
-	if err := RunReviewBundleImport([]string{"--cwd", wrongClone, "--bundle", bundlePath, "--receipt", receiptPath, "--request", wrongRequestPath}, io.Discard); err == nil {
-		t.Fatal("RunReviewBundleImport() accepted a mismatched fix delta artifact")
+	if err := RunReviewBundleImport([]string{"--cwd", wrongClone, "--bundle", bundlePath, "--receipt", receiptPath, "--request", wrongRequestPath}, io.Discard); err != nil {
+		t.Fatalf("RunReviewBundleImport() trusted unrelated fix-delta prose: %v", err)
 	}
 	wrongStore, err := reviewtransaction.AuthoritativeStore(context.Background(), wrongClone, tx.LineageID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(wrongStore.Dir, "HEAD")); !os.IsNotExist(err) {
-		t.Fatalf("failed corrected import installed authoritative HEAD: %v", err)
+	if _, err := wrongStore.LoadChain(); err != nil {
+		t.Fatalf("derived corrected import did not install authoritative chain: %v", err)
 	}
 
 	clone := filepath.Join(t.TempDir(), "clone")

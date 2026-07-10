@@ -308,7 +308,7 @@ func validateSuccessor(previous, next Transaction, operation string) error {
 	if releaseBinding {
 		withoutRelease := next
 		withoutRelease.Release = nil
-		if operation != "review/bind-release-evidence" || previous.State != StateReadyFinalVerification || next.State != StateReadyFinalVerification || !reflect.DeepEqual(previous, withoutRelease) {
+		if operation != "review/bind-release-evidence" || previous.State != StateReadyFinalVerification || next.State != StateReadyFinalVerification || !transactionsEqual(previous, withoutRelease) {
 			return fmt.Errorf("%w: release evidence must be bound as the only change while ready for final verification", ErrInvalidSuccessor)
 		}
 	}
@@ -321,7 +321,7 @@ func validateSuccessor(previous, next Transaction, operation string) error {
 	if err := validateSuccessorCounters(previous, next); err != nil {
 		return err
 	}
-	if previous.LedgerHash != "" && previous.LedgerHash != next.LedgerHash {
+	if previous.LedgerHash != "" && (previous.LedgerHash != next.LedgerHash || previous.LedgerFindingsHash != next.LedgerFindingsHash) {
 		return fmt.Errorf("%w: frozen ledger hash changed", ErrInvalidSuccessor)
 	}
 	if previous.JudgeProofHash != "" && (previous.JudgeProofHash != next.JudgeProofHash || previous.JudgeAgreementHash != next.JudgeAgreementHash || !reflect.DeepEqual(previous.JudgeProofs, next.JudgeProofs)) {
@@ -350,6 +350,51 @@ func validateSuccessor(previous, next Transaction, operation string) error {
 		return fmt.Errorf("%w: fix delta changed outside fix completion", ErrInvalidSuccessor)
 	}
 	return nil
+}
+
+// transactionsEqual compares persisted transaction state. JSON omits empty
+// optional arrays, so a local empty slice and its nil decoded form represent
+// the same immutable release-binding state.
+func transactionsEqual(left, right Transaction) bool {
+	normalize := func(transaction *Transaction) {
+		if len(transaction.Snapshot.IntendedUntracked) == 0 {
+			transaction.Snapshot.IntendedUntracked = nil
+		}
+		if len(transaction.Snapshot.LedgerIDs) == 0 {
+			transaction.Snapshot.LedgerIDs = nil
+		}
+		if len(transaction.Snapshot.Paths) == 0 {
+			transaction.Snapshot.Paths = nil
+		}
+		if len(transaction.Findings) == 0 {
+			transaction.Findings = nil
+		}
+		if len(transaction.FixFindingIDs) == 0 {
+			transaction.FixFindingIDs = nil
+		}
+		if len(transaction.PendingRefuterIDs) == 0 {
+			transaction.PendingRefuterIDs = nil
+		}
+		if len(transaction.FixCausedFindings) == 0 {
+			transaction.FixCausedFindings = nil
+		}
+		if len(transaction.JudgeProofs) == 0 {
+			transaction.JudgeProofs = nil
+		}
+		for index := range transaction.Findings {
+			if len(transaction.Findings[index].ProofRefs) == 0 {
+				transaction.Findings[index].ProofRefs = nil
+			}
+		}
+		for index := range transaction.FixCausedFindings {
+			if len(transaction.FixCausedFindings[index].ProofRefs) == 0 {
+				transaction.FixCausedFindings[index].ProofRefs = nil
+			}
+		}
+	}
+	normalize(&left)
+	normalize(&right)
+	return reflect.DeepEqual(left, right)
 }
 
 func validateSuccessorCounters(previous, next Transaction) error {

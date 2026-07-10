@@ -1226,6 +1226,13 @@ func (m Model) handleKeyPress(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// preset writes the same model matrix the UI displayed.
 				presetCarrilModels := model.CodexCarrilModelsForPreset(string(m.CodexModelPicker.Preset))
 				m.Selection.CodexCarrilModelAssignments = presetCarrilModels
+				if m.CodexModelPicker.CustomConfirmed {
+					m.Selection.CodexOrchestratorAssignment = nil
+					m.Selection.ClearCodexOrchestratorAssignment = true
+				} else {
+					m.Selection.CodexOrchestratorAssignment = model.CodexPresetOrchestratorAssignment(string(m.CodexModelPicker.Preset))
+					m.Selection.ClearCodexOrchestratorAssignment = false
+				}
 
 				// When the user confirmed Custom per-phase assignments, also
 				// persist the per-phase model map so the inject layer can render
@@ -1256,6 +1263,8 @@ func (m Model) handleKeyPress(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.PendingSyncOverrides = &model.SyncOverrides{
 						TargetAgents:                []model.AgentID{model.AgentCodex},
 						CodexModelAssignments:       assignments,
+						CodexOrchestratorAssignment: m.Selection.CodexOrchestratorAssignment,
+						ClearCodexOrchestratorAssignment: m.Selection.ClearCodexOrchestratorAssignment,
 						CodexCarrilModelAssignments: presetCarrilModels,
 						CodexPhaseModelAssignments:  phaseOverride,
 					}

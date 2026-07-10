@@ -64,6 +64,110 @@ type ReviewGateDeniedError struct {
 	Result reviewtransaction.GateResult
 }
 
+// ReviewStepInput keeps lifecycle mutations explicit while ensuring every
+// accepted state transition is performed by the transaction API and appended
+// to the authoritative CAS store.
+type ReviewStepInput struct {
+	Findings        []reviewtransaction.Finding               `json:"findings"`
+	LedgerHash      string                                    `json:"ledger_hash"`
+	Evidence        []reviewtransaction.FindingEvidence       `json:"evidence"`
+	RefuterOutcomes []reviewtransaction.EvidenceResult        `json:"refuter_outcomes"`
+	FailedEvidence  string                                    `json:"failed_evidence_revision"`
+	Snapshot        *reviewtransaction.Snapshot               `json:"snapshot"`
+	FixDeltaHash    string                                    `json:"fix_delta_hash"`
+	LedgerIDs       []string                                  `json:"ledger_ids"`
+	Validation      *reviewtransaction.ScopedValidationResult `json:"validation"`
+	EvidenceHash    string                                    `json:"evidence_hash"`
+	Approved        bool                                      `json:"approved"`
+	Release         *reviewtransaction.ReleaseEvidence        `json:"release"`
+	JudgeProofs     []reviewtransaction.JudgeProof            `json:"judge_proofs"`
+	JudgeAgreement  string                                    `json:"judge_agreement_hash"`
+}
+
+func RunReviewStep(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("review-step", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	cwd := flags.String("cwd", "", "repository root")
+	lineage := flags.String("lineage", "", "review lineage identifier")
+	operation := flags.String("operation", "", "lifecycle operation")
+	inputPath := flags.String("input", "", "JSON operation input")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected review-step argument %q", flags.Arg(0))
+	}
+	if strings.TrimSpace(*cwd) == "" || strings.TrimSpace(*lineage) == "" || strings.TrimSpace(*operation) == "" || strings.TrimSpace(*inputPath) == "" {
+		return errors.New("review-step requires --cwd, --lineage, --operation, and --input")
+	}
+	payload, err := os.ReadFile(*inputPath)
+	if err != nil {
+		return fmt.Errorf("read review step input: %w", err)
+	}
+	var input ReviewStepInput
+	if err := json.Unmarshal(payload, &input); err != nil {
+		return fmt.Errorf("parse review step input: %w", err)
+	}
+	store, err := reviewtransaction.AuthoritativeStore(context.Background(), *cwd, *lineage)
+	if err != nil {
+		return fmt.Errorf("derive authoritative review store: %w", err)
+	}
+	chain, err := store.LoadChain()
+	if err != nil {
+		return fmt.Errorf("load authoritative review transaction: %w", err)
+	}
+	tx := chain.Records[len(chain.Records)-1].Transaction
+	switch *operation {
+	case "record-judge-proofs":
+		err = tx.RecordJudgeProofs(input.JudgeProofs, input.JudgeAgreement)
+	case "freeze-findings":
+		err = tx.FreezeFindings(input.Findings, input.LedgerHash)
+	case "classify-evidence":
+		_, err = tx.ClassifyEvidence(input.Evidence)
+	case "apply-refuter-outcomes":
+		err = tx.ApplyRefuterOutcomes(input.RefuterOutcomes)
+	case "begin-fix":
+		err = tx.BeginFix(input.FailedEvidence)
+	case "complete-fix":
+		if input.Snapshot == nil {
+			return errors.New("complete-fix requires snapshot")
+		}
+		err = tx.CompleteFix(*input.Snapshot, input.FixDeltaHash, input.LedgerIDs)
+	case "validate-fix":
+		if input.Validation == nil {
+			return errors.New("validate-fix requires validation")
+		}
+		err = tx.ValidateFixDeltaResult(*input.Validation)
+	case "bind-release":
+		if input.Release == nil {
+			return errors.New("bind-release requires release")
+		}
+		err = tx.BindReleaseEvidence(*input.Release)
+	case "begin-final-verification":
+		err = tx.BeginFinalVerification()
+	case "complete-final-verification":
+		err = tx.CompleteFinalVerification(input.EvidenceHash, input.Approved)
+	default:
+		return fmt.Errorf("unsupported review lifecycle operation %q", *operation)
+	}
+	if err != nil {
+		return fmt.Errorf("apply review lifecycle operation: %w", err)
+	}
+	operationName := "review/" + *operation
+	if *operation == "bind-release" {
+		operationName = "review/bind-release-evidence"
+	}
+	revision, err := store.Append(chain.HeadRevision, reviewtransaction.Record{Operation: operationName, Transaction: tx})
+	if err != nil {
+		return fmt.Errorf("append review lifecycle operation: %w", err)
+	}
+	result := ReviewResumeResult{Schema: ReviewResumeSchema, Operation: operationName, Target: tx.Snapshot, Transaction: tx, StoreAuthority: "repository-git-common-dir", StoreRevision: revision, GenesisRevision: chain.GenesisRevision}
+	if updated, loadErr := store.LoadChain(); loadErr == nil {
+		result.ChainIdentity = updated.Identity
+	}
+	return encodeReviewJSON(stdout, result)
+}
+
 func (err ReviewGateDeniedError) Error() string {
 	return fmt.Sprintf("review lifecycle gate denied: %s", err.Result)
 }
@@ -246,8 +350,8 @@ func RunReviewBundleImport(args []string, stdout io.Writer) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected review-bundle-import argument %q", flags.Arg(0))
 	}
-	if strings.TrimSpace(*cwd) == "" || strings.TrimSpace(*bundlePath) == "" || strings.TrimSpace(*receiptPath) == "" || strings.TrimSpace(*requestPath) == "" {
-		return errors.New("review-bundle-import requires --cwd, --bundle, --receipt, and --request")
+	if strings.TrimSpace(*cwd) == "" || strings.TrimSpace(*bundlePath) == "" || strings.TrimSpace(*requestPath) == "" {
+		return errors.New("review-bundle-import requires --cwd, --bundle, and --request")
 	}
 	bundlePayload, err := os.ReadFile(*bundlePath)
 	if err != nil {
@@ -257,13 +361,21 @@ func RunReviewBundleImport(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("parse review chain bundle: %w", err)
 	}
-	receiptPayload, err := os.ReadFile(*receiptPath)
-	if err != nil {
-		return fmt.Errorf("read review receipt: %w", err)
-	}
-	receipt, err := reviewtransaction.ParseReceipt(receiptPayload)
-	if err != nil {
-		return fmt.Errorf("parse review receipt: %w", err)
+	var receipt reviewtransaction.Receipt
+	if strings.TrimSpace(*receiptPath) != "" {
+		receiptPayload, err := os.ReadFile(*receiptPath)
+		if err != nil {
+			return fmt.Errorf("read review receipt: %w", err)
+		}
+		receipt, err = reviewtransaction.ParseReceipt(receiptPayload)
+		if err != nil {
+			return fmt.Errorf("parse review receipt: %w", err)
+		}
+		if bundle.TerminalReceipt == nil {
+			return errors.New("nonterminal review bundle cannot be imported with a terminal receipt")
+		}
+	} else if bundle.TerminalReceipt != nil {
+		return errors.New("terminal review bundle import requires --receipt")
 	}
 	requestPayload, err := os.ReadFile(*requestPath)
 	if err != nil {
@@ -277,27 +389,24 @@ func RunReviewBundleImport(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("derive current repository target: %w", err)
 	}
-	policyHash, err := reviewtransaction.HashArtifact(request.PolicyArtifact)
-	if err != nil {
-		return fmt.Errorf("hash policy artifact: %w", err)
-	}
-	ledgerHash, err := reviewtransaction.HashLedgerArtifact(request.LedgerArtifact)
-	if err != nil {
-		return fmt.Errorf("hash ledger artifact: %w", err)
-	}
-	evidenceHash, err := reviewtransaction.HashArtifact(request.EvidenceArtifact)
-	if err != nil {
-		return fmt.Errorf("hash evidence artifact: %w", err)
-	}
-	fixDeltaHash := reviewtransaction.EmptyFixDeltaHash
-	if strings.TrimSpace(request.FixDeltaArtifact) != "" {
-		fixDeltaHash, err = reviewtransaction.HashArtifact(request.FixDeltaArtifact)
+	policyHash, ledgerHash, evidenceHash := bundle.PolicyHash, bundle.LedgerHash, bundle.EvidenceHash
+	if bundle.TerminalReceipt != nil {
+		policyHash, err = reviewtransaction.HashArtifact(request.PolicyArtifact)
 		if err != nil {
-			return fmt.Errorf("hash fix delta artifact: %w", err)
+			return fmt.Errorf("hash policy artifact: %w", err)
+		}
+		ledgerHash, err = reviewtransaction.HashLedgerArtifact(request.LedgerArtifact)
+		if err != nil {
+			return fmt.Errorf("hash ledger artifact: %w", err)
+		}
+		evidenceHash, err = reviewtransaction.HashArtifact(request.EvidenceArtifact)
+		if err != nil {
+			return fmt.Errorf("hash evidence artifact: %w", err)
 		}
 	}
+	fixDeltaHash := ""
 	chain, err := reviewtransaction.ImportBundle(context.Background(), *cwd, bundle, reviewtransaction.BundleImportExpectation{
-		LineageID: receipt.LineageID, Snapshot: snapshot,
+		LineageID: bundle.LineageID, Snapshot: snapshot,
 		PolicyHash: policyHash, LedgerHash: ledgerHash, EvidenceHash: evidenceHash, FixDeltaHash: fixDeltaHash, Receipt: receipt,
 		GenesisRevision: request.GenesisRevision, HeadRevision: request.StoreRevision,
 		ChainIdentity: request.ChainIdentity, BundleDigest: request.BundleDigest,
@@ -306,7 +415,7 @@ func RunReviewBundleImport(args []string, stdout io.Writer) error {
 		return fmt.Errorf("install validated review chain bundle: %w", err)
 	}
 	return encodeReviewJSON(stdout, ReviewBundleResult{
-		Schema: ReviewBundleSchema, Operation: "review/bundle-import", LineageID: receipt.LineageID,
+		Schema: ReviewBundleSchema, Operation: "review/bundle-import", LineageID: bundle.LineageID,
 		BundleDigest: bundle.BundleDigest, StoreRevision: chain.HeadRevision,
 		GenesisRevision: chain.GenesisRevision, ChainIdentity: chain.Identity, BundlePath: *bundlePath,
 	})

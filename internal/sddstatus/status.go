@@ -74,6 +74,7 @@ type ArtifactPaths struct {
 	Tasks         []string `json:"tasks"`
 	ApplyProgress []string `json:"applyProgress"`
 	VerifyReport  []string `json:"verifyReport"`
+	ReviewPolicy  []string `json:"reviewPolicy"`
 	ReviewLedger  []string `json:"reviewLedger"`
 	ReviewReceipt []string `json:"reviewReceipt"`
 	ReviewBundle  []string `json:"reviewBundle"`
@@ -336,9 +337,10 @@ func Resolve(options ResolveOptions) (Status, error) {
 		firstPath(artifactPaths.ReviewBundle),
 		firstPath(artifactPaths.ReviewContext),
 		firstPath(artifactPaths.ReviewState),
+		firstPath(artifactPaths.ReviewPolicy),
 		firstPath(artifactPaths.ReviewLedger),
 		firstPath(artifactPaths.VerifyReport),
-		"", "", "", "", "", "",
+		"", "", "", "", "", "", "",
 	)
 	if options.IncludeInstructions {
 		instructions := renderPhaseInstructions(status)
@@ -383,6 +385,7 @@ func resolveEngramStatus(workspaceRoot string, requestedChange string, includeIn
 		"applyProgress": engramArtifactState(artifactsByType["apply-progress"]),
 		"verifyReport":  engramArtifactState(artifactsByType["verify-report"]),
 		"reviewLedger":  engramArtifactState(artifactsByType["review/ledger"]),
+		"reviewPolicy":  engramArtifactState(artifactsByType["review/policy"]),
 		"reviewReceipt": engramArtifactState(artifactsByType["review/receipt"]),
 		"reviewBundle":  engramArtifactState(artifactsByType["review/chain-bundle"]),
 		"reviewContext": engramArtifactState(artifactsByType["review/gate-context"]),
@@ -424,11 +427,12 @@ func resolveEngramStatus(workspaceRoot string, requestedChange string, includeIn
 	applyReviewGate(
 		&status,
 		workspaceRoot,
-		"", "", "", "", "", "",
+		"", "", "", "", "", "", "",
 		artifactsByType["review/receipt"].Content,
 		artifactsByType["review/chain-bundle"].Content,
 		artifactsByType["review/gate-context"].Content,
 		artifactsByType["review/transaction"].Content,
+		artifactsByType["review/policy"].Content,
 		artifactsByType["review/ledger"].Content,
 		artifactsByType["verify-report"].Content,
 	)
@@ -554,7 +558,7 @@ func projectFromGitConfig(content string) string {
 	return ""
 }
 
-var engramTitlePattern = regexp.MustCompile(`^sdd/([^/]+)/(proposal|spec|design|tasks|apply-progress|verify-report|review/(?:transaction|ledger|receipt|chain-bundle|gate-context)|state)$`)
+var engramTitlePattern = regexp.MustCompile(`^sdd/([^/]+)/(proposal|spec|design|tasks|apply-progress|verify-report|review/(?:transaction|policy|ledger|receipt|chain-bundle|gate-context)|state)$`)
 
 func collectEngramChanges(observations []engramObservation, project string) []string {
 	seen := map[string]bool{}
@@ -617,6 +621,9 @@ func engramArtifactPaths(changeName string, artifacts map[string]engramObservati
 	}
 	if _, ok := artifacts["review/ledger"]; ok {
 		paths.ReviewLedger = []string{fmt.Sprintf("sdd/%s/review/ledger", changeName)}
+	}
+	if _, ok := artifacts["review/policy"]; ok {
+		paths.ReviewPolicy = []string{fmt.Sprintf("sdd/%s/review/policy", changeName)}
 	}
 	if _, ok := artifacts["review/receipt"]; ok {
 		paths.ReviewReceipt = []string{fmt.Sprintf("sdd/%s/review/receipt", changeName)}
@@ -899,6 +906,7 @@ func resolveArtifactPaths(changeRoot string) (ArtifactPaths, error) {
 	paths.ApplyProgress = existingPath(filepath.Join(changeRoot, "apply-progress.md"))
 	paths.VerifyReport = existingPath(filepath.Join(changeRoot, "verify-report.md"))
 	paths.ReviewLedger = existingPath(filepath.Join(changeRoot, "reviews", "ledger.json"))
+	paths.ReviewPolicy = existingPath(filepath.Join(changeRoot, "reviews", "policy.md"))
 	paths.ReviewReceipt = existingPath(filepath.Join(changeRoot, "reviews", "receipt.json"))
 	paths.ReviewBundle = existingPath(filepath.Join(changeRoot, "reviews", "chain-bundle.json"))
 	paths.ReviewContext = existingPath(filepath.Join(changeRoot, "reviews", "gate-context.json"))
@@ -921,6 +929,7 @@ func emptyArtifactPaths() ArtifactPaths {
 		ApplyProgress: []string{},
 		VerifyReport:  []string{},
 		ReviewLedger:  []string{},
+		ReviewPolicy:  []string{},
 		ReviewReceipt: []string{},
 		ReviewBundle:  []string{},
 		ReviewContext: []string{},

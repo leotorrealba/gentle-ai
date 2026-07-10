@@ -206,25 +206,27 @@ func validateBundleExpectation(ctx context.Context, repo string, bundle ChainBun
 	if err := validateSnapshot(expected.Snapshot); err != nil {
 		return fmt.Errorf("expected current snapshot: %w", err)
 	}
-	if err := validateReceiptStructure(expected.Receipt); err != nil {
-		return fmt.Errorf("expected receipt: %w", err)
-	}
 	terminal := chain.Records[len(chain.Records)-1].Transaction
-	receipt, err := terminal.Receipt()
-	if err != nil || bundle.TerminalReceipt == nil || !reflect.DeepEqual(receipt, expected.Receipt) || !reflect.DeepEqual(*bundle.TerminalReceipt, expected.Receipt) {
-		return errors.New("review chain bundle does not match the expected terminal receipt")
+	if bundle.TerminalReceipt != nil {
+		if err := validateReceiptStructure(expected.Receipt); err != nil {
+			return fmt.Errorf("expected receipt: %w", err)
+		}
+		receipt, err := terminal.Receipt()
+		if err != nil || !reflect.DeepEqual(receipt, expected.Receipt) || !reflect.DeepEqual(*bundle.TerminalReceipt, expected.Receipt) {
+			return errors.New("review chain bundle does not match the expected terminal receipt")
+		}
+		if expected.LineageID != receipt.LineageID || receipt.LineageID != terminal.LineageID || receipt.Generation != terminal.Generation || receipt.Mode != terminal.Mode {
+			return errors.New("review chain bundle does not match the expected lineage, generation, or mode")
+		}
 	}
-	if expected.LineageID != receipt.LineageID || receipt.LineageID != terminal.LineageID || receipt.Generation != terminal.Generation || receipt.Mode != terminal.Mode {
-		return errors.New("review chain bundle does not match the expected lineage, generation, or mode")
-	}
-	if expected.Snapshot.CandidateTree != receipt.FinalCandidateTree || expected.Snapshot.CandidateTree != terminal.FinalCandidateTree || expected.Snapshot.PathsDigest != receipt.PathsDigest || expected.Snapshot.PathsDigest != terminal.PathsDigest {
+	if expected.Snapshot.CandidateTree != terminal.FinalCandidateTree || expected.Snapshot.PathsDigest != terminal.PathsDigest {
 		return errors.New("review chain bundle does not match current delivered content or path scope")
 	}
 	intendedProof, err := (SnapshotBuilder{Repo: repo}).untrackedProof(ctx, expected.Snapshot.CandidateTree, terminal.Snapshot.IntendedUntracked)
 	if err != nil || intendedProof != terminal.Snapshot.IntendedUntrackedProof {
 		return errors.New("review chain bundle does not match the authoritative intended-untracked proof")
 	}
-	if expected.PolicyHash != receipt.PolicyHash || expected.LedgerHash != receipt.LedgerHash || expected.EvidenceHash != receipt.EvidenceHash || expected.FixDeltaHash != receipt.FixDeltaHash {
+	if expected.PolicyHash != terminal.PolicyHash || expected.LedgerHash != terminal.LedgerHash || expected.EvidenceHash != terminal.EvidenceHash || (expected.FixDeltaHash != "" && expected.FixDeltaHash != terminal.FixDeltaHash) {
 		return errors.New("review chain bundle does not match current policy, ledger, evidence, or fix delta")
 	}
 	return nil

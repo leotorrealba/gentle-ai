@@ -7121,3 +7121,25 @@ func TestStrictTDDForward(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexModelPickerCustomConfirmSignalsOrchestratorClear(t *testing.T) {
+	m := NewModel(system.DetectionResult{}, "dev")
+	m.Screen = ScreenCodexModelPicker
+	m.ModelConfigMode = true
+	m.CodexModelPicker = screens.NewCodexModelPickerState()
+	m.CodexModelPicker.CustomMode = screens.CodexCustomModePhaseList
+	m.Selection.CodexOrchestratorAssignment = model.CodexPresetOrchestratorAssignment(string(model.CodexPresetRecommended))
+	m.Cursor = 13 // Confirm row after the 13 phases.
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	state := updated.(Model)
+	if state.Selection.CodexOrchestratorAssignment != nil {
+		t.Fatalf("custom confirmation retained curated orchestrator: %#v", state.Selection.CodexOrchestratorAssignment)
+	}
+	if !state.Selection.ClearCodexOrchestratorAssignment {
+		t.Fatal("custom confirmation did not signal persisted orchestrator clear")
+	}
+	if state.PendingSyncOverrides == nil || !state.PendingSyncOverrides.ClearCodexOrchestratorAssignment {
+		t.Fatal("custom confirmation did not propagate clear signal to sync overrides")
+	}
+}

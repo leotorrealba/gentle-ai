@@ -122,8 +122,8 @@ func resolveBoundedRemediation(required bool, verify verifyResultEvaluation, tra
 func applyReviewGate(
 	status *Status,
 	repo string,
-	receiptPath, bundlePath, requestPath, transactionPath, ledgerPath, verifyPath string,
-	receiptContent, bundleContent, requestContent, transactionContent, ledgerContent, verifyContent string,
+	receiptPath, bundlePath, requestPath, transactionPath, policyPath, ledgerPath, verifyPath string,
+	receiptContent, bundleContent, requestContent, transactionContent, policyContent, ledgerContent, verifyContent string,
 ) {
 	if status.Dependencies.Verify != DependencyAllDone || !status.TaskProgress.AllComplete {
 		return
@@ -167,6 +167,10 @@ func applyReviewGate(
 		blockReviewGate(status, reviewtransaction.GateInvalidated, "persisted frozen review ledger is missing")
 		return
 	}
+	if _, ok := readReviewArtifact(policyPath, policyContent); !ok {
+		blockReviewGate(status, reviewtransaction.GateInvalidated, "persisted review policy is missing")
+		return
+	}
 	if _, ok := readReviewArtifact(verifyPath, verifyContent); !ok {
 		blockReviewGate(status, reviewtransaction.GateInvalidated, "current structured verify evidence is missing")
 		return
@@ -180,6 +184,18 @@ func applyReviewGate(
 	if err != nil {
 		blockReviewGate(status, reviewtransaction.GateInvalidated, fmt.Sprintf("review gate request is invalid: %v", err))
 		return
+	}
+	// Engram retains artifact bytes even after an OpenSpec workspace has been
+	// cleaned. Feed those bytes to the native gate instead of treating virtual
+	// topic names as filesystem paths.
+	if ledgerPath == "" {
+		request.LedgerContent = ledgerContent
+	}
+	if policyPath == "" {
+		request.PolicyContent = policyContent
+	}
+	if verifyPath == "" {
+		request.EvidenceContent = verifyContent
 	}
 	if request.StoreRevision != bundle.HeadRevision || request.GenesisRevision != bundle.GenesisRevision || request.ChainIdentity != bundle.ChainIdentity || request.BundleDigest != bundle.BundleDigest {
 		blockReviewGate(status, reviewtransaction.GateInvalidated, "gate request does not bind the portable review chain bundle identity")

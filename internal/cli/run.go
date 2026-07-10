@@ -207,6 +207,7 @@ func RunInstall(args []string, detection system.DetectionResult) (InstallResult,
 		ClaudePhaseAssignments:      claudePhaseState,
 		KiroModelAssignments:        kiroAliasesToStrings(input.Selection.KiroModelAssignments),
 		CodexModelAssignments:       codexEffortsToStrings(input.Selection.CodexModelAssignments),
+		CodexOrchestratorAssignment: codexOrchestratorToState(input.Selection.CodexOrchestratorAssignment),
 		CodexCarrilModelAssignments: input.Selection.CodexCarrilModelAssignments,
 		CodexPhaseModelAssignments:  input.Selection.CodexPhaseModelAssignments,
 		ModelAssignments:            modelAssignmentsToState(input.Selection.ModelAssignments),
@@ -247,6 +248,9 @@ func mergeExplicitAgentInstallState(homeDir string, newState state.InstallState,
 	}
 	if newState.KiroModelAssignments != nil {
 		merged.KiroModelAssignments = newState.KiroModelAssignments
+	}
+	if newState.CodexOrchestratorAssignment != nil {
+		merged.CodexOrchestratorAssignment = newState.CodexOrchestratorAssignment
 	}
 	if newState.CodexModelAssignments != nil {
 		merged.CodexModelAssignments = newState.CodexModelAssignments
@@ -979,6 +983,7 @@ func (s componentApplyStep) Run() error {
 				}
 			}
 			engramOpts := engram.InjectOptions{
+				CodexOrchestratorAssignment: s.selection.CodexOrchestratorAssignment,
 				CodexCarrilModelAssignments: s.selection.CodexCarrilModelAssignments,
 				CodexModelAssignments:       s.selection.CodexModelAssignments,
 				Version:                     engramVersion,
@@ -1946,4 +1951,18 @@ func modelAssignmentsToState(m map[string]model.ModelAssignment) map[string]stat
 		out[k] = state.ModelAssignmentState{ProviderID: v.ProviderID, ModelID: v.ModelID, Effort: v.Effort}
 	}
 	return out
+}
+
+func codexOrchestratorToState(a *model.CodexOrchestratorAssignment) *state.CodexOrchestratorAssignmentState {
+	if a == nil {
+		return nil
+	}
+	return &state.CodexOrchestratorAssignmentState{Model: a.Model, Effort: string(a.Effort)}
+}
+
+func codexOrchestratorFromState(a *state.CodexOrchestratorAssignmentState) *model.CodexOrchestratorAssignment {
+	if a == nil {
+		return nil
+	}
+	return &model.CodexOrchestratorAssignment{Model: a.Model, Effort: model.CodexEffort(a.Effort)}
 }

@@ -15,6 +15,8 @@ type Selection struct {
 	ClaudePhaseAssignments      map[string]ClaudePhaseAssignment // key = phase name; value = Claude model+effort
 	KiroModelAssignments        map[string]KiroModelAlias        // key = phase name; value = Kiro-native model alias
 	CodexModelAssignments       map[string]CodexEffort           // key = phase name; value = low|medium|high|xhigh
+	CodexOrchestratorAssignment *CodexOrchestratorAssignment      // non-nil = apply curated top-level Codex model/effort
+	ClearCodexOrchestratorAssignment bool                          // true = clear persisted curated assignment while preserving config.toml
 	CodexCarrilModelAssignments map[string]string                // key = carril profile (sdd-strong|sdd-mid|sdd-cheap); value = model id
 	CodexPhaseModelAssignments  map[string]string                // key = phase name; value = model id (Custom per-phase picker only)
 	Profiles                    []Profile                        // named SDD profiles to generate/update during sync
@@ -67,6 +69,8 @@ type SyncOverrides struct {
 	ClaudePhaseAssignments      map[string]ClaudePhaseAssignment // nil = no override; empty map = reset to defaults
 	KiroModelAssignments        map[string]KiroModelAlias        // nil = no override; empty map = reset to defaults
 	CodexModelAssignments       map[string]CodexEffort           // nil = no override; empty map = reset to defaults
+	CodexOrchestratorAssignment *CodexOrchestratorAssignment      // non-nil = apply curated top-level Codex model/effort
+	ClearCodexOrchestratorAssignment bool                          // true = clear persisted curated assignment while preserving config.toml
 	CodexCarrilModelAssignments map[string]string                // nil = no override; empty map = reset to defaults
 	CodexPhaseModelAssignments  map[string]string                // nil = no override (partial sync); non-nil empty = clear (preset selected); non-nil non-empty = custom per-phase assignments
 	SDDMode                     SDDModeID                        // "" = no override; when non-empty, overrides the sync's default SDD mode

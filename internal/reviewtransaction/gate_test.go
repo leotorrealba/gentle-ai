@@ -127,6 +127,55 @@ func TestNativeReleaseGateDerivesCompleteImmutableBoundary(t *testing.T) {
 	}
 }
 
+func TestNativeGateRejectsHistoricalTargetAfterHeadAdvances(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	transaction, receipt, request := nativeGateFixture(t, repo, "lifecycle-head")
+	store, err := AuthoritativeStore(context.Background(), repo, transaction.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendApprovedStoreChain(t, store, transaction)
+	bundle, err := store.ExportBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.StoreRevision, request.GenesisRevision, request.ChainIdentity, request.BundleDigest = bundle.HeadRevision, bundle.GenesisRevision, bundle.ChainIdentity, bundle.BundleDigest
+	request.Target = Target{Kind: TargetExactRevision, Revision: trimGit(gitSnapshot(t, repo, "rev-parse", "HEAD"))}
+	writeSnapshotFile(t, repo, "tracked.txt", "newer candidate\n")
+	gitSnapshot(t, repo, "add", "tracked.txt")
+	gitSnapshot(t, repo, "commit", "-m", "newer")
+	if got := EvaluateNativeGate(context.Background(), repo, receipt, request); got.Result == GateAllow {
+		t.Fatal("historical caller-selected target authorized a newer lifecycle candidate")
+	}
+}
+
+func TestNativeGateUsesRetainedArtifactContentAndRejectsMismatch(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	tx, receipt, request := nativeGateFixture(t, repo, "content-gate")
+	store, err := AuthoritativeStore(context.Background(), repo, tx.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendApprovedStoreChain(t, store, tx)
+	bundle, err := store.ExportBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.StoreRevision, request.GenesisRevision, request.ChainIdentity, request.BundleDigest = bundle.HeadRevision, bundle.GenesisRevision, bundle.ChainIdentity, bundle.BundleDigest
+	policy, _ := os.ReadFile(request.PolicyArtifact)
+	ledger, _ := os.ReadFile(request.LedgerArtifact)
+	evidence, _ := os.ReadFile(request.EvidenceArtifact)
+	request.PolicyArtifact, request.LedgerArtifact, request.EvidenceArtifact = "missing", "missing", "missing"
+	request.PolicyContent, request.LedgerContent, request.EvidenceContent = string(policy), string(ledger), string(evidence)
+	if got := EvaluateNativeGate(context.Background(), repo, receipt, request); got.Result != GateAllow {
+		t.Fatalf("retained content gate = %#v", got)
+	}
+	request.LedgerContent = `{"schema":"gentle-ai.review-ledger/v1","findings":[{"id":"mismatch"}]}`
+	if got := EvaluateNativeGate(context.Background(), repo, receipt, request); got.Result == GateAllow {
+		t.Fatal("mismatched retained ledger content was accepted")
+	}
+}
+
 func TestNativeGateRejectsForgedStandaloneTerminalHead(t *testing.T) {
 	repo := initSnapshotRepo(t)
 	tx, receipt, request := nativeGateFixture(t, repo, "forged-terminal-lineage")

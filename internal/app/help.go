@@ -25,6 +25,7 @@ COMMANDS
 	  review-start --cwd <repo> --lineage <id> --policy-file <path>
 	               Build a target and append to the repository-derived review store
 	  review-resume --cwd <repo> --lineage <id>
+	  review-step --cwd <repo> --lineage <id> --operation <operation> --input <json>
 	               Re-emit authoritative state after output or mirror failure
 	  review-bundle-export --cwd <repo> --lineage <id> --out <path>
 	               Export the validated full chain as a portable content-addressed bundle

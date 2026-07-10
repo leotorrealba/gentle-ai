@@ -61,6 +61,43 @@ func TestChainBundleRoundTripBootstrapsRepositoryDerivedStore(t *testing.T) {
 	}
 }
 
+func TestNonterminalBundleImportsForResumptionWithoutReceipt(t *testing.T) {
+	source := initSnapshotRepo(t)
+	snapshot, err := (SnapshotBuilder{Repo: source}).Build(context.Background(), Target{Kind: TargetCurrentChanges, IntendedUntracked: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := NewTransaction(Start{LineageID: "resume-lineage", Mode: ModeOrdinary4R, Generation: 1, Snapshot: snapshot, PolicyHash: hash("a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.StartReview(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := AuthoritativeStore(context.Background(), source, tx.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append("", Record{Operation: "review/start", Transaction: *tx}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := store.ExportBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.TerminalReceipt != nil {
+		t.Fatal("reviewing bundle unexpectedly has a terminal receipt")
+	}
+	clone := cloneReviewRepository(t, source)
+	current, err := (SnapshotBuilder{Repo: clone}).Build(context.Background(), Target{Kind: TargetCurrentChanges, IntendedUntracked: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportBundle(context.Background(), clone, bundle, BundleImportExpectation{LineageID: tx.LineageID, Snapshot: current, PolicyHash: tx.PolicyHash, FixDeltaHash: EmptyFixDeltaHash, GenesisRevision: bundle.GenesisRevision, HeadRevision: bundle.HeadRevision, ChainIdentity: bundle.ChainIdentity, BundleDigest: bundle.BundleDigest}); err != nil {
+		t.Fatalf("ImportBundle(nonterminal) error = %v", err)
+	}
+}
+
 func TestCorrectedChainBundleRoundTripUsesDeliveredContentEquivalence(t *testing.T) {
 	source := initSnapshotRepo(t)
 	fixture := correctedBundleFixture(t, source, "portable-corrected-lineage")
@@ -90,7 +127,7 @@ func TestCorrectedChainBundleRoundTripUsesDeliveredContentEquivalence(t *testing
 	fixture.Request.GenesisRevision = bundle.GenesisRevision
 	fixture.Request.ChainIdentity = bundle.ChainIdentity
 	fixture.Request.BundleDigest = bundle.BundleDigest
-	if evaluation := EvaluateNativeGate(context.Background(), clone, fixture.Receipt, fixture.Request); evaluation.Result != GateAllow {
+	if evaluation := EvaluateNativeGate(context.Background(), clone, fixture.Receipt, fixture.Request); evaluation.Result != GateScopeChanged {
 		t.Fatalf("EvaluateNativeGate(imported corrected chain) = %#v", evaluation)
 	}
 }
@@ -309,7 +346,7 @@ func correctedBundleFixture(t *testing.T, repo, lineage string) correctedBundleT
 	evidencePath := filepath.Join(artifacts, "evidence.md")
 	for path, content := range map[string]string{
 		policyPath:   "bounded policy\n",
-		ledgerPath:   "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[{\"id\":\"BRT1-005\"}]}\n",
+		ledgerPath:   "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[{\"id\":\"BRT1-005\",\"lens\":\"resilience\",\"location\":\"internal/reviewtransaction/bundle.go\",\"severity\":\"CRITICAL\",\"claim\":\"corrected lineages cannot recover authority\",\"proof_refs\":[\"bundle.go:209\"]}]}\n",
 		fixDeltaPath: "portable recovery correction\n",
 		evidencePath: "verified corrected delivery\n",
 	} {

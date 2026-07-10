@@ -994,7 +994,7 @@ func TestInjectCodexWritesProfiles(t *testing.T) {
 		name            string
 		reasoningEffort string
 	}{
-		{"sdd-strong.config.toml", "high"},
+		{"sdd-strong.config.toml", "medium"},
 		{"sdd-mid.config.toml", "medium"},
 		{"sdd-cheap.config.toml", "low"},
 	}
@@ -1064,7 +1064,7 @@ func TestProfileFallbackAgreesWithRenderFallback(t *testing.T) {
 		carril     string
 		wantEffort string
 	}{
-		{"sdd-strong", "high"},
+		{"sdd-strong", "medium"},
 		{"sdd-mid", "medium"},
 		{"sdd-cheap", "low"},
 	}
@@ -2246,5 +2246,44 @@ func TestInjectWithOptionsReInjectConvergesFullToSlimAndBack(t *testing.T) {
 	}
 	if n := strings.Count(string(afterBackToFull), "<!-- gentle-ai:engram-protocol -->"); n != 1 {
 		t.Fatalf("expected exactly 1 open marker after re-inject back to full (no duplication), got %d", n)
+	}
+}
+
+func TestInjectCodexOrchestratorAssignmentWritesTopLevelModel(t *testing.T) {
+	validCodexRuntime(t)
+	home := t.TempDir()
+	opts := InjectOptions{CodexOrchestratorAssignment: model.CodexPresetOrchestratorAssignment(string(model.CodexPresetRecommended))}
+	if _, err := InjectWithOptions(home, codexAdapter(), opts); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	if !strings.Contains(text, `model = "gpt-5.6-sol"`) || !strings.Contains(text, `model_reasoning_effort = "low"`) {
+		t.Fatalf("top-level orchestrator assignment missing:\n%s", text)
+	}
+}
+
+func TestInjectCodexNilOrchestratorAssignmentPreservesTopLevelModel(t *testing.T) {
+	validCodexRuntime(t)
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("model = \"user-model\"\nmodel_reasoning_effort = \"high\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InjectWithOptions(home, codexAdapter(), InjectOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), `model = "user-model"`) || !strings.Contains(string(content), `model_reasoning_effort = "high"`) {
+		t.Fatalf("nil assignment clobbered top-level model:\n%s", content)
 	}
 }

@@ -64,7 +64,7 @@ func TestWriteCodexProfiles_WritesModelAndEffort(t *testing.T) {
 }
 
 // TestWriteCodexProfiles_DefaultFallback asserts that nil assignments use
-// canonical Recommended defaults: sdd-strong=high, sdd-mid=medium, sdd-cheap=low.
+// canonical Recommended defaults: sdd-strong=medium, sdd-mid=medium, sdd-cheap=low.
 func TestWriteCodexProfiles_DefaultFallback(t *testing.T) {
 	dir := t.TempDir()
 
@@ -76,13 +76,13 @@ func TestWriteCodexProfiles_DefaultFallback(t *testing.T) {
 		t.Fatal("WriteCodexProfiles(nil) changed = false, want true on first write")
 	}
 
-	// sdd-strong must have gpt-5.6-sol and effort=high (Recommended default)
+	// sdd-strong must have gpt-5.6-sol and effort=medium (Recommended default)
 	strong, _ := os.ReadFile(filepath.Join(dir, "sdd-strong.config.toml"))
 	if !strings.Contains(string(strong), `"gpt-5.6-sol"`) {
 		t.Errorf("sdd-strong default model: want gpt-5.6-sol; got:\n%s", strong)
 	}
-	if !strings.Contains(string(strong), `"high"`) {
-		t.Errorf("sdd-strong default effort: want high; got:\n%s", strong)
+	if !strings.Contains(string(strong), `"medium"`) {
+		t.Errorf("sdd-strong default effort: want medium; got:\n%s", strong)
 	}
 	// sdd-mid must have gpt-5.6-terra and effort=medium (Recommended default)
 	mid, _ := os.ReadFile(filepath.Join(dir, "sdd-mid.config.toml"))

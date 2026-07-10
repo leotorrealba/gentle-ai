@@ -22,9 +22,9 @@ func TestNewCodexModelPickerStateFromAssignments_KnownPreset(t *testing.T) {
 		wantPreset  screens.CodexModelPreset
 	}{
 		{
-			name:        "Recommended map → Recommended preset",
+			name:        "Recommended map → LowCost preset when profiles are equivalent",
 			assignments: model.CodexModelPresetRecommended(),
-			wantPreset:  screens.CodexPresetRecommended,
+			wantPreset:  screens.CodexPresetLowCost,
 		},
 		{
 			name:        "Powerful map → Powerful preset",
@@ -202,13 +202,13 @@ func TestCodexPickerLabels_SelfDescribing(t *testing.T) {
 		},
 		{
 			preset:           screens.CodexPresetRecommended,
-			wantStrongEffort: "high",
+			wantStrongEffort: "medium",
 			wantMidEffort:    "medium",
 			wantCheapEffort:  "low",
 		},
 		{
 			preset:           screens.CodexPresetPowerful,
-			wantStrongEffort: "xhigh",
+			wantStrongEffort: "high",
 			wantMidEffort:    "high",
 			wantCheapEffort:  "low",
 		},

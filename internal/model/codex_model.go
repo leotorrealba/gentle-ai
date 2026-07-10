@@ -87,15 +87,33 @@ var codexPresetMatrix = map[CodexPresetKey]map[string]CodexCarrilDefault{
 		"sdd-cheap":  {Model: "gpt-5.6-luna", Effort: CodexEffortLow},
 	},
 	CodexPresetRecommended: {
-		"sdd-strong": {Model: "gpt-5.6-sol", Effort: CodexEffortHigh},
+		"sdd-strong": {Model: "gpt-5.6-sol", Effort: CodexEffortMedium},
 		"sdd-mid":    {Model: "gpt-5.6-terra", Effort: CodexEffortMedium},
 		"sdd-cheap":  {Model: "gpt-5.6-luna", Effort: CodexEffortLow},
 	},
 	CodexPresetPowerful: {
-		"sdd-strong": {Model: "gpt-5.6-sol", Effort: CodexEffortXHigh},
+		"sdd-strong": {Model: "gpt-5.6-sol", Effort: CodexEffortHigh},
 		"sdd-mid":    {Model: "gpt-5.6-terra", Effort: CodexEffortHigh},
 		"sdd-cheap":  {Model: "gpt-5.6-luna", Effort: CodexEffortLow},
 	},
+}
+
+
+// CodexOrchestratorAssignment is the explicit top-level Codex session model
+// selected by a Gentle AI preset. It is separate from delegated SDD carriles.
+type CodexOrchestratorAssignment struct {
+	Model  string
+	Effort CodexEffort
+}
+
+// CodexPresetOrchestratorAssignment returns the main-session policy for a
+// named preset. All curated presets keep orchestration responsive at low effort.
+// Unknown keys intentionally fall back to Recommended.
+func CodexPresetOrchestratorAssignment(preset string) *CodexOrchestratorAssignment {
+	if _, ok := codexPresetMatrix[CodexPresetKey(preset)]; !ok {
+		preset = string(CodexPresetRecommended)
+	}
+	return &CodexOrchestratorAssignment{Model: "gpt-5.6-sol", Effort: CodexEffortLow}
 }
 
 // CodexPresetCarrilDefaults returns a defensive copy of the selected preset's
@@ -178,8 +196,9 @@ type CodexTierGroup struct {
 // fallback in RenderCodexPhaseEfforts and the nil-input fallback in
 // resolveProfileAssignments agree on the same canonical tier values:
 //
-//	Carril      LowCost(+$20)  Recommended($100)  Powerful($200)
-//	sdd-strong  medium         high               xhigh
+// These efforts are Gentle AI workload policy, not Codex defaults.
+//	Carril      LowCost  Recommended  Powerful
+//	sdd-strong  medium   medium       high
 //	sdd-mid     medium         medium             high
 //	sdd-cheap   low            low                low
 var codexTierGroups = []CodexTierGroup{

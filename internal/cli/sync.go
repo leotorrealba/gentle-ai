@@ -617,6 +617,7 @@ func (s componentSyncStep) Run() error {
 		// Sync: inject MCP config + system prompt protocol only.
 		// NO binary install. NO engram setup.
 		engramOpts := engram.InjectOptions{
+			CodexOrchestratorAssignment: s.selection.CodexOrchestratorAssignment,
 			CodexCarrilModelAssignments: s.selection.CodexCarrilModelAssignments,
 			CodexModelAssignments:       s.selection.CodexModelAssignments,
 		}
@@ -994,6 +995,10 @@ func RunSync(args []string) (SyncResult, error) {
 		}
 		selection.ModelAssignments = m
 	}
+	if selection.CodexOrchestratorAssignment == nil && persistedState.CodexOrchestratorAssignment != nil {
+		selection.CodexOrchestratorAssignment = codexOrchestratorFromState(persistedState.CodexOrchestratorAssignment)
+	}
+
 	// Restore Codex effort and carril model assignments from state so that
 	// `gentle-ai sync` preserves the user's per-phase effort and per-carril
 	// model choices instead of falling back to canonical defaults every time.

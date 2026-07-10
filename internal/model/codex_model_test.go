@@ -97,8 +97,8 @@ func TestRenderCodexPhaseEfforts_LowCostTierValues(t *testing.T) {
 
 func TestRenderCodexPhaseEfforts_PowerfulTierValues(t *testing.T) {
 	out := model.RenderCodexPhaseEfforts(model.CodexModelPresetPowerful(), nil)
-	// Powerful: sdd-strong=xhigh, sdd-mid=high, sdd-cheap=low
-	checkCarrilRow(t, out, "sdd-strong", model.CodexEffortXHigh)
+	// Powerful: sdd-strong=high, sdd-mid=high, sdd-cheap=low
+	checkCarrilRow(t, out, "sdd-strong", model.CodexEffortHigh)
 	checkCarrilRow(t, out, "sdd-mid", model.CodexEffortHigh)
 	checkCarrilRow(t, out, "sdd-cheap", model.CodexEffortLow)
 }
@@ -118,23 +118,23 @@ func TestRenderCodexPhaseEfforts_CorrectCarrilEfforts(t *testing.T) {
 		wantCheap  model.CodexEffort
 	}{
 		{
-			name:       "LowCost/Plus$20",
+			name:       "LowCost",
 			preset:     model.CodexModelPresetLowCost(),
 			wantStrong: model.CodexEffortMedium,
 			wantMid:    model.CodexEffortMedium,
 			wantCheap:  model.CodexEffortLow,
 		},
 		{
-			name:       "Recommended/Pro$100",
+			name:       "Recommended",
 			preset:     model.CodexModelPresetRecommended(),
-			wantStrong: model.CodexEffortHigh,
+			wantStrong: model.CodexEffortMedium,
 			wantMid:    model.CodexEffortMedium,
 			wantCheap:  model.CodexEffortLow,
 		},
 		{
-			name:       "Powerful/Pro$200",
+			name:       "Powerful",
 			preset:     model.CodexModelPresetPowerful(),
-			wantStrong: model.CodexEffortXHigh,
+			wantStrong: model.CodexEffortHigh,
 			wantMid:    model.CodexEffortHigh,
 			wantCheap:  model.CodexEffortLow,
 		},
@@ -259,12 +259,12 @@ func TestPresetLowCost_ModelEffortPerCarril(t *testing.T) {
 }
 
 func TestPresetRecommended_ModelEffortPerCarril(t *testing.T) {
-	// Recommended: Razonamiento=gpt-5.6-sol/high, Código=gpt-5.6-terra/medium, Liviano=gpt-5.6-luna/low
+	// Recommended: Razonamiento=gpt-5.6-sol/medium, Código=gpt-5.6-terra/medium, Liviano=gpt-5.6-luna/low
 	m := model.CodexModelPresetRecommended()
-	if m["sdd-propose"] != model.CodexEffortHigh {
-		t.Errorf("Recommended preset sdd-propose = %q, want high", m["sdd-propose"])
+	if m["sdd-propose"] != model.CodexEffortMedium {
+		t.Errorf("Recommended preset sdd-propose = %q, want medium", m["sdd-propose"])
 	}
-	// sdd-apply belongs to Código (sdd-mid): must be medium in Pro $100, not high.
+	// sdd-apply belongs to Código (sdd-mid): must be medium in the balanced workload policy, not high.
 	if m["sdd-apply"] != model.CodexEffortMedium {
 		t.Errorf("Recommended preset sdd-apply = %q, want medium (Código carril)", m["sdd-apply"])
 	}
@@ -282,10 +282,10 @@ func TestPresetRecommended_ModelEffortPerCarril(t *testing.T) {
 }
 
 func TestPresetPowerful_ModelEffortPerCarril(t *testing.T) {
-	// Powerful: Razonamiento=gpt-5.6-sol/xhigh, Código=gpt-5.6-terra/high, Liviano=gpt-5.6-luna/low
+	// Powerful: Razonamiento=gpt-5.6-sol/high, Código=gpt-5.6-terra/high, Liviano=gpt-5.6-luna/low
 	m := model.CodexModelPresetPowerful()
-	if m["sdd-propose"] != model.CodexEffortXHigh {
-		t.Errorf("Powerful preset sdd-propose = %q, want xhigh", m["sdd-propose"])
+	if m["sdd-propose"] != model.CodexEffortHigh {
+		t.Errorf("Powerful preset sdd-propose = %q, want high", m["sdd-propose"])
 	}
 	if m["sdd-apply"] != model.CodexEffortHigh {
 		t.Errorf("Powerful preset sdd-apply = %q, want high", m["sdd-apply"])
@@ -544,8 +544,8 @@ func TestRenderCodexPhaseEffortsByPhase_UnassignedUsesProvidedCarrilModel(t *tes
 	)
 
 	wantRows := []string{
-		"| `sdd-propose` | `gpt-5.4` | `high` |",
-		"| `sdd-design` | `gpt-5.4-mini` | `high` |",
+		"| `sdd-propose` | `gpt-5.4` | `medium` |",
+		"| `sdd-design` | `gpt-5.4-mini` | `medium` |",
 		"| `sdd-apply` | `gpt-5.5` | `medium` |",
 		"| `sdd-explore` | `gpt-5.3-codex` | `low` |",
 	}
@@ -586,5 +586,14 @@ func checkCarrilRowModel(t *testing.T, table string, profile string, wantModel s
 	modelCell := "| `" + wantModel + "` |"
 	if !strings.Contains(row, modelCell) {
 		t.Errorf("profile %q row = %q: want model cell %q", profile, row, modelCell)
+	}
+}
+
+func TestCodexPresetOrchestratorAssignment_AllPresetsUseSolLow(t *testing.T) {
+	for _, preset := range []model.CodexPresetKey{model.CodexPresetLowCost, model.CodexPresetRecommended, model.CodexPresetPowerful} {
+		a := model.CodexPresetOrchestratorAssignment(string(preset))
+		if a.Model != "gpt-5.6-sol" || a.Effort != model.CodexEffortLow {
+			t.Errorf("preset %q orchestrator = %s/%s, want gpt-5.6-sol/low", preset, a.Model, a.Effort)
+		}
 	}
 }

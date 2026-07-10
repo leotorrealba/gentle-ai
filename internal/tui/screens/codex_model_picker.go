@@ -11,20 +11,17 @@ import (
 )
 
 // CodexModelPreset represents a named effort-tier preset for Codex per-phase
-// reasoning_effort assignments. Each preset corresponds to a ChatGPT plan tier.
+// reasoning_effort assignments. Efforts are Gentle AI workload policy, not Codex defaults.
 type CodexModelPreset string
 
 const (
-	// CodexPresetLowCost targets ChatGPT Plus ($20/mo) — minimal effort to
-	// stay within the plan's tight usage limits.
+	// CodexPresetLowCost minimizes delegated workload effort.
 	CodexPresetLowCost CodexModelPreset = CodexModelPreset(model.CodexPresetLowCost)
 
-	// CodexPresetRecommended targets ChatGPT Pro ($100/mo) — balanced effort
-	// for most SDD work. This is the default preset.
+	// CodexPresetRecommended balances quality and usage. This is the default preset.
 	CodexPresetRecommended CodexModelPreset = CodexModelPreset(model.CodexPresetRecommended)
 
-	// CodexPresetPowerful targets ChatGPT Pro ($200/mo) — xhigh effort for
-	// architecture-heavy and review-heavy phases.
+	// CodexPresetPowerful uses high effort for reasoning-heavy and coding phases.
 	CodexPresetPowerful CodexModelPreset = CodexModelPreset(model.CodexPresetPowerful)
 )
 
@@ -37,7 +34,7 @@ var codexPresetOrder = []CodexModelPreset{
 var codexPresetDescriptions = map[CodexModelPreset]string{
 	CodexPresetLowCost:     "Lowest-cost GPT-5.6 mix — Terra for work, Luna for lightweight phases",
 	CodexPresetRecommended: "Balanced GPT-5.6 mix — Sol for reasoning, Terra for code, Luna for light work",
-	CodexPresetPowerful:    "Maximum-effort GPT-5.6 mix — Sol for reasoning, Terra for code, Luna for light work",
+	CodexPresetPowerful:    "High-effort GPT-5.6 mix — Sol for reasoning, Terra for code, Luna for light work",
 }
 
 var codexPresetConstructors = map[CodexModelPreset]func() map[string]model.CodexEffort{
@@ -108,7 +105,8 @@ func NewCodexModelPickerStateFromAssignments(assignments map[string]model.CodexE
 	if len(assignments) == 0 {
 		return NewCodexModelPickerState()
 	}
-	for preset, constructor := range codexPresetConstructors {
+	for _, preset := range codexPresetOrder {
+		constructor := codexPresetConstructors[preset]
 		if codexAssignmentsEqual(constructor(), assignments) {
 			return CodexModelPickerState{
 				Preset:            preset,
@@ -546,7 +544,8 @@ func codexModelSearchDisplay(query string) string {
 // Labels are self-describing: they include the model id and effort tier per
 // carril so the user can see what will be written to profile files.
 //
-// Format: "<Plan> — Razonamiento <model>/<effort> · Código <model>/<effort> · Liviano <model>/<effort>"
+// All presets also set the main orchestrator to gpt-5.6-sol/low.
+// Format: "<Plan> — Orquestador <model>/<effort> · Razonamiento <model>/<effort> · Código <model>/<effort> · Liviano <model>/<effort>"
 func CodexPresetLabel(preset CodexModelPreset) string {
 	defaults := model.CodexPresetCarrilDefaults(string(preset))
 	strong := defaults["sdd-strong"]
@@ -563,8 +562,11 @@ func CodexPresetLabel(preset CodexModelPreset) string {
 		plan = "Powerful"
 	}
 
-	return fmt.Sprintf("%s — Razonamiento %s/%s · Código %s/%s · Liviano %s/%s",
+	orchestrator := model.CodexPresetOrchestratorAssignment(string(preset))
+	return fmt.Sprintf("%s — Orquestador %s/%s · Razonamiento %s/%s · Código %s/%s · Liviano %s/%s",
 		plan,
+		orchestrator.Model,
+		orchestrator.Effort,
 		strong.Model,
 		strong.Effort,
 		mid.Model,

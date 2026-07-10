@@ -6318,7 +6318,7 @@ func TestInject_CodexPerPhaseModelAssignments_InjectsPerPhaseTable(t *testing.T)
 		t.Errorf("AGENTS.md missing expected sdd-propose row %q:\n%s", wantRow, text)
 	}
 	// An unassigned strong phase must preserve the supplied carril model.
-	wantFallbackRow := "| `sdd-design` | `gpt-5.4-mini` | `high` |"
+	wantFallbackRow := "| `sdd-design` | `gpt-5.4-mini` | `medium` |"
 	if !strings.Contains(text, wantFallbackRow) {
 		t.Errorf("AGENTS.md missing preserved carril fallback row %q:\n%s", wantFallbackRow, text)
 	}

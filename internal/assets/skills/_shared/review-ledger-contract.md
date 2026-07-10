@@ -56,6 +56,7 @@ Only `approved | escalated` are terminal transaction states. `scope-changed | in
 OpenSpec mode persists exact machine-readable artifacts:
 
 - `openspec/changes/{change-name}/reviews/transaction.json`
+- `openspec/changes/{change-name}/reviews/policy.md`
 - `openspec/changes/{change-name}/reviews/ledger.json`
 - `openspec/changes/{change-name}/reviews/receipt.json`
 - `openspec/changes/{change-name}/reviews/chain-bundle.json`
@@ -70,12 +71,13 @@ Writers use a non-blocking cross-platform OS lock with token/PID/host/timestamp 
 Engram mode upserts the equivalent exact topics:
 
 - `sdd/{change-name}/review/transaction`
+- `sdd/{change-name}/review/policy`
 - `sdd/{change-name}/review/ledger`
 - `sdd/{change-name}/review/receipt`
 - `sdd/{change-name}/review/chain-bundle`
 - `sdd/{change-name}/review/gate-context`
 
-Ad-hoc review uses `review/{target-slug}/{transaction|ledger|receipt|chain-bundle|gate-context}`. If no artifact store exists, keep all artifacts inline for the current session and never claim durable receipt reuse.
+Ad-hoc review uses `review/{target-slug}/{transaction|policy|ledger|receipt|chain-bundle|gate-context}`. If no artifact store exists, keep all artifacts inline for the current session and never claim durable receipt reuse.
 
 Post-implementation/post-apply starts ordinary review only when no valid receipt exists. Pre-commit, pre-push, pre-PR, release, and SDD archive call the native receipt validator for the same content-bound receipt; they never create a budget or silently launch Judgment Day. Gate context binds expected HEAD, genesis, ordered chain identity, and bundle digest. The validator derives the authoritative store root, validates the complete semantic chain, derives the current repository target, and hashes policy, ledger, fix delta, verify evidence, and release artifacts from persisted inputs; caller-authored store paths, transactions, trees, or hash assertions are never authoritative. Missing, `scope-changed`, `invalidated`, and `escalated` results emit machine-readable denial and return non-success.
 

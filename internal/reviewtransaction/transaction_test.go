@@ -1,6 +1,7 @@
 package reviewtransaction
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -129,6 +130,53 @@ func TestInformationalFixCausedFindingCannotEscalate(t *testing.T) {
 	if tx.State != StateReadyFinalVerification {
 		t.Fatalf("State = %q, want ready_final_verification", tx.State)
 	}
+}
+
+func TestJudgmentDayCarriesEarlierSevereFixCausedFindingIntoNextCorrection(t *testing.T) {
+	tx := newTestTransaction(t, ModeJudgmentDay)
+	_ = tx.StartReview()
+	_ = tx.RecordJudgeProofs([]JudgeProof{{JudgeID: "a", ExecutionHash: hash("1"), ResultHash: hash("2"), Blind: true, Confirmed: true}, {JudgeID: "b", ExecutionHash: hash("3"), ResultHash: hash("4"), Blind: true, Confirmed: true}}, hash("5"))
+	_ = tx.FreezeFindings([]Finding{{ID: "JD-001", Severity: "CRITICAL"}}, hash("6"))
+	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "JD-001", Class: EvidenceDeterministic, Proof: "reproduced"}})
+	_ = tx.BeginFix(hash("7"))
+	fix := tx.Snapshot
+	fix.Kind, fix.BaseTree, fix.CandidateTree, fix.LedgerIDs, fix.Identity = TargetFixDiff, tx.FinalCandidateTree, tree("c"), []string{"JD-001"}, hash("8")
+	_ = tx.CompleteFix(fix, hash("9"), []string{"JD-001"})
+	if err := tx.ValidateFixDeltaResult(ScopedValidationResult{LedgerIDs: []string{"JD-001"}, FixCausedFindings: []Finding{{ID: "FIX-001", Lens: "scoped", Location: "x.go:1", Severity: "CRITICAL", Claim: "new defect", ProofRefs: []string{"test failure"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if tx.State != StateFixRequired || !equalStrings(tx.FixFindingIDs, []string{"FIX-001", "JD-001"}) {
+		t.Fatalf("severe earlier fix-caused finding was not correction-bound: state=%q ids=%v", tx.State, tx.FixFindingIDs)
+	}
+}
+
+func TestFrozenLedgerFindingsHashDetectsTamperedFrozenFindings(t *testing.T) {
+	tx := newTestTransaction(t, ModeOrdinary4R)
+	_ = tx.StartReview()
+	_ = tx.FreezeFindings([]Finding{{ID: "R1-001", Severity: "CRITICAL"}}, hash("1"))
+	tx.Findings[0].Severity = "WARNING"
+	if _, err := ParseTransaction(mustMarshalTransaction(t, *tx)); err == nil {
+		t.Fatal("ParseTransaction() accepted frozen findings that no longer match their ledger binding")
+	}
+}
+
+func TestCompleteFixDerivesDeltaIdentityInsteadOfTrustingCallerArtifact(t *testing.T) {
+	tx := ordinaryAtFixValidation(t)
+	if tx.FixDeltaHash != FixDeltaHashForSnapshot(tx.Snapshot) {
+		t.Fatalf("FixDeltaHash = %q, want authoritative snapshot-derived identity %q", tx.FixDeltaHash, FixDeltaHashForSnapshot(tx.Snapshot))
+	}
+	if tx.FixDeltaHash == hash("4") {
+		t.Fatal("arbitrary caller artifact hash satisfied fix-delta binding")
+	}
+}
+
+func mustMarshalTransaction(t *testing.T, transaction Transaction) []byte {
+	t.Helper()
+	payload, err := json.Marshal(transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
 }
 
 func TestInsufficientEvidenceIsInconclusiveAndNeverAutoFixed(t *testing.T) {

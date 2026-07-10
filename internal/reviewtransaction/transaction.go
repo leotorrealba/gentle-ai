@@ -134,6 +134,7 @@ type Transaction struct {
 	FixDeltaHash           string                     `json:"fix_delta_hash"`
 	PolicyHash             string                     `json:"policy_hash"`
 	LedgerHash             string                     `json:"ledger_hash"`
+	LedgerFindingsHash     string                     `json:"ledger_findings_hash"`
 	EvidenceHash           string                     `json:"evidence_hash"`
 	JudgeProofHash         string                     `json:"judge_proof_hash,omitempty"`
 	JudgeAgreementHash     string                     `json:"judge_agreement_hash,omitempty"`
@@ -250,6 +251,7 @@ func (transaction *Transaction) FreezeFindings(findings []Finding, ledgerHash st
 		transaction.Outcomes[id] = outcome
 	}
 	transaction.LedgerHash = ledgerHash
+	transaction.LedgerFindingsHash = findingsHash(validated)
 	transaction.State = StateFindingsFrozen
 	return nil
 }
@@ -428,9 +430,6 @@ func (transaction *Transaction) CompleteFix(snapshot Snapshot, fixDeltaHash stri
 	if snapshot.Kind != TargetFixDiff || snapshot.BaseTree != transaction.FinalCandidateTree {
 		return errors.New("fix snapshot must be a fix-diff based on the previous final candidate tree")
 	}
-	if !validSHA256(fixDeltaHash) {
-		return errors.New("fix_delta_hash must be a lowercase SHA-256 identity")
-	}
 	ids, err := canonicalStrings(ledgerIDs, "ledger id")
 	if err != nil {
 		return err
@@ -440,9 +439,24 @@ func (transaction *Transaction) CompleteFix(snapshot Snapshot, fixDeltaHash stri
 	}
 	transaction.Snapshot = snapshot
 	transaction.FinalCandidateTree = snapshot.CandidateTree
-	transaction.FixDeltaHash = fixDeltaHash
+	transaction.FixDeltaHash = FixDeltaHashForSnapshot(snapshot)
 	transaction.State = StateFixValidating
 	return nil
+}
+
+// FixDeltaHashForSnapshot is derived solely from the authoritative fix
+// snapshot boundary. Narrative patches and caller-provided artifact hashes are
+// not evidence of the correction that changed the candidate tree.
+func FixDeltaHashForSnapshot(snapshot Snapshot) string {
+	hash := sha256.New()
+	hash.Write([]byte("gentle-ai.fix-delta/v1\x00"))
+	for _, value := range []string{snapshot.BaseTree, snapshot.CandidateTree, snapshot.PathsDigest, snapshot.IntendedUntrackedProof} {
+		writeLengthPrefixed(hash, []byte(value))
+	}
+	for _, value := range snapshot.LedgerIDs {
+		writeLengthPrefixed(hash, []byte(value))
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
 func (transaction *Transaction) ValidateFixDelta(ledgerIDs []string, approved bool) error {
@@ -491,6 +505,13 @@ func (transaction *Transaction) ValidateFixDeltaResult(result ScopedValidationRe
 		result.Approved = true
 	}
 	transaction.FixCausedFindings = append(transaction.FixCausedFindings, validated...)
+	if transaction.Mode == ModeJudgmentDay && severeFixCaused > 0 {
+		for _, finding := range validated {
+			if isSevereSeverity(finding.Severity) {
+				transaction.FixFindingIDs = addUniqueSorted(transaction.FixFindingIDs, finding.ID)
+			}
+		}
+	}
 	switch transaction.Mode {
 	case ModeOrdinary4R:
 		if transaction.Counters.ScopedFixValidations >= 1 {
@@ -585,6 +606,12 @@ func ParseTransaction(payload []byte) (Transaction, error) {
 }
 
 func (transaction *Transaction) validate() error {
+	// v1 events written before semantic ledger binding used only ledger_hash.
+	// Their immutable findings deterministically supply the missing binding on
+	// read; the native gate still compares it to the retained ledger content.
+	if transaction.LedgerHash != "" && transaction.LedgerFindingsHash == "" && len(transaction.Findings) > 0 || transaction.LedgerHash != "" && transaction.LedgerFindingsHash == "" && transaction.Findings != nil {
+		transaction.LedgerFindingsHash = findingsHash(transaction.Findings)
+	}
 	if transaction.Schema != TransactionSchema {
 		return errors.New("unsupported review transaction schema")
 	}
@@ -610,6 +637,9 @@ func (transaction *Transaction) validate() error {
 	}
 	if transaction.LedgerHash != "" && !validSHA256(transaction.LedgerHash) {
 		return errors.New("transaction ledger_hash is invalid")
+	}
+	if transaction.LedgerFindingsHash != "" && !validSHA256(transaction.LedgerFindingsHash) {
+		return errors.New("transaction ledger_findings_hash is invalid")
 	}
 	if transaction.EvidenceHash != "" && !validSHA256(transaction.EvidenceHash) {
 		return errors.New("transaction evidence_hash is invalid")
@@ -827,8 +857,15 @@ func (transaction *Transaction) validateFindingRouting() error {
 			return fmt.Errorf("outcome %q is not bound to a frozen finding", id)
 		}
 	}
+	fixCaused := make(map[string]Finding, len(transaction.FixCausedFindings))
+	for _, finding := range transaction.FixCausedFindings {
+		fixCaused[finding.ID] = finding
+	}
 	for _, id := range append(append([]string{}, transaction.FixFindingIDs...), transaction.PendingRefuterIDs...) {
 		finding, ok := findings[id]
+		if !ok {
+			finding, ok = fixCaused[id]
+		}
 		if !ok || !isSevereSeverity(finding.Severity) {
 			return fmt.Errorf("routed finding %q is not BLOCKER or CRITICAL", id)
 		}
@@ -844,10 +881,16 @@ func (transaction *Transaction) validateFindingRouting() error {
 	if hasStringIntersection(fixIDs, pendingIDs) {
 		return errors.New("a severe finding cannot be both correction-bound and pending refutation")
 	}
-	if transaction.State != StateUnreviewed && transaction.State != StateReviewing && transaction.State != StateJudgesConfirmed && !validSHA256(transaction.LedgerHash) {
+	if transaction.State != StateUnreviewed && transaction.State != StateReviewing && transaction.State != StateJudgesConfirmed && (!validSHA256(transaction.LedgerHash) || !validSHA256(transaction.LedgerFindingsHash) || transaction.LedgerFindingsHash != findingsHash(transaction.Findings)) {
 		return errors.New("frozen review state requires a content-bound ledger hash")
 	}
 	return transaction.validateFindingState(findings, severe)
+}
+
+func findingsHash(findings []Finding) string {
+	payload, _ := json.Marshal(findings)
+	sum := sha256.Sum256(append([]byte("gentle-ai.review-ledger-findings/v1\x00"), payload...))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (transaction *Transaction) validateFindingState(findings, severe map[string]Finding) error {
@@ -931,6 +974,11 @@ func (transaction *Transaction) validateFindingState(findings, severe map[string
 	if len(transaction.Classifications) != len(severe) {
 		return errors.New("evidence classification must cover every frozen severe finding exactly once")
 	}
+	for _, finding := range transaction.FixCausedFindings {
+		if isSevereSeverity(finding.Severity) {
+			corroborated[finding.ID] = struct{}{}
+		}
+	}
 	if len(fixSet) != len(corroborated) {
 		return errors.New("correction IDs must equal all and only corroborated severe findings")
 	}
@@ -987,7 +1035,7 @@ func (transaction *Transaction) validateResolutionCounters(hasCorrections bool) 
 		}
 		if hasCorrections {
 			wrongBase := transaction.Mode == ModeOrdinary4R && transaction.Snapshot.BaseTree != transaction.InitialReviewTree
-			if !validSHA256(transaction.FailedEvidenceRevision) || transaction.Snapshot.Kind != TargetFixDiff || wrongBase || transaction.Snapshot.CandidateTree != transaction.FinalCandidateTree || !equalStrings(transaction.Snapshot.LedgerIDs, transaction.FixFindingIDs) || transaction.FixDeltaHash == EmptyFixDeltaHash {
+			if !validSHA256(transaction.FailedEvidenceRevision) || transaction.Snapshot.Kind != TargetFixDiff || wrongBase || transaction.Snapshot.CandidateTree != transaction.FinalCandidateTree || !equalStrings(transaction.Snapshot.LedgerIDs, transaction.FixFindingIDs) || transaction.FixDeltaHash != FixDeltaHashForSnapshot(transaction.Snapshot) {
 				return errors.New("corrected final verification readiness requires a complete ledger-bound fix snapshot")
 			}
 		}

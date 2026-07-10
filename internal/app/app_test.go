@@ -334,7 +334,7 @@ func TestRunArgsDispatchesNativeReviewOperationsBeforePlatformValidation(t *test
 		{command: "review-start", want: "review-start requires --cwd, --lineage, and --policy-file"},
 		{command: "review-resume", want: "review-resume requires --cwd and --lineage"},
 		{command: "review-bundle-export", want: "review-bundle-export requires --cwd, --lineage, and --out"},
-		{command: "review-bundle-import", want: "review-bundle-import requires --cwd, --bundle, --receipt, and --request"},
+		{command: "review-bundle-import", want: "review-bundle-import requires --cwd, --bundle, and --request"},
 		{command: "review-validate", want: "review-validate requires --cwd, --receipt, and --request"},
 	} {
 		t.Run(test.command, func(t *testing.T) {
@@ -2026,5 +2026,56 @@ func TestRunArgs_NoPendingSync_NoSyncCall(t *testing.T) {
 
 	if syncCalled != 0 {
 		t.Errorf("deferredSyncFn called %d times, want 0 (no pending sync)", syncCalled)
+	}
+}
+
+func TestCustomSyncClearsPersistedCodexOrchestratorAssignment(t *testing.T) {
+	home := t.TempDir()
+	if err := state.Write(home, state.InstallState{
+		InstalledAgents: []string{"codex"},
+		CodexOrchestratorAssignment: &state.CodexOrchestratorAssignmentState{
+			Model: "gpt-5.6-sol", Effort: "low",
+		},
+	}); err != nil {
+		t.Fatalf("state.Write (seed): %v", err)
+	}
+
+	selection := model.Selection{}
+	loadPersistedAssignments(home, &selection)
+	applyOverrides(&selection, &model.SyncOverrides{ClearCodexOrchestratorAssignment: true})
+	if selection.CodexOrchestratorAssignment != nil {
+		t.Fatalf("same-sync selection retained curated orchestrator: %#v", selection.CodexOrchestratorAssignment)
+	}
+	persistAssignments(home, selection)
+
+	persisted, err := state.Read(home)
+	if err != nil {
+		t.Fatalf("state.Read: %v", err)
+	}
+	if persisted.CodexOrchestratorAssignment != nil {
+		t.Fatalf("persisted curated orchestrator was not cleared: %#v", persisted.CodexOrchestratorAssignment)
+	}
+}
+
+func TestCustomClearRoundTripLeavesFutureSyncInPreserveMode(t *testing.T) {
+	home := t.TempDir()
+	if err := state.Write(home, state.InstallState{
+		InstalledAgents: []string{"codex"},
+		CodexOrchestratorAssignment: &state.CodexOrchestratorAssignmentState{
+			Model: "gpt-5.6-sol", Effort: "low",
+		},
+	}); err != nil {
+		t.Fatalf("state.Write (seed): %v", err)
+	}
+
+	first := model.Selection{}
+	loadPersistedAssignments(home, &first)
+	applyOverrides(&first, &model.SyncOverrides{ClearCodexOrchestratorAssignment: true})
+	persistAssignments(home, first)
+
+	future := model.Selection{}
+	loadPersistedAssignments(home, &future)
+	if future.CodexOrchestratorAssignment != nil || future.ClearCodexOrchestratorAssignment {
+		t.Fatalf("future sync did not return to preserve mode: assignment=%#v clear=%v", future.CodexOrchestratorAssignment, future.ClearCodexOrchestratorAssignment)
 	}
 }

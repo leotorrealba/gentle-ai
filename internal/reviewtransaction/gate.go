@@ -26,9 +26,12 @@ type GateRequest struct {
 	ChainIdentity    string                      `json:"chain_identity"`
 	BundleDigest     string                      `json:"bundle_digest"`
 	PolicyArtifact   string                      `json:"policy_artifact"`
+	PolicyContent    string                      `json:"policy_content,omitempty"`
 	LedgerArtifact   string                      `json:"ledger_artifact"`
+	LedgerContent    string                      `json:"ledger_content,omitempty"`
 	FixDeltaArtifact string                      `json:"fix_delta_artifact,omitempty"`
 	EvidenceArtifact string                      `json:"evidence_artifact"`
+	EvidenceContent  string                      `json:"evidence_content,omitempty"`
 	ExternalEvidence ExternalEvidenceDisposition `json:"external_evidence,omitempty"`
 	Release          *ReleaseRequest             `json:"release,omitempty"`
 }
@@ -114,28 +117,32 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 		return invalid("receipt does not match the authoritative transaction revision")
 	}
 
-	snapshot, err := (SnapshotBuilder{Repo: repo}).Build(ctx, request.Target)
+	lifecycleTarget, err := lifecycleTargetForGate(ctx, repo, request)
+	if err != nil {
+		return invalid("current lifecycle target cannot be derived: " + err.Error())
+	}
+	snapshot, err := (SnapshotBuilder{Repo: repo}).Build(ctx, lifecycleTarget)
 	if err != nil {
 		return invalid("current repository target cannot be derived: " + err.Error())
 	}
-	policyHash, err := HashArtifact(request.PolicyArtifact)
+	policyHash, err := hashArtifactSource(request.PolicyArtifact, request.PolicyContent)
 	if err != nil {
 		return invalid("policy artifact cannot be hashed: " + err.Error())
 	}
-	ledgerHash, err := hashLedgerArtifact(request.LedgerArtifact)
+	ledgerHash, ledgerFindingsHash, err := hashLedgerArtifactSource(request.LedgerArtifact, request.LedgerContent)
 	if err != nil {
 		return invalid("frozen ledger cannot be validated: " + err.Error())
 	}
-	evidenceHash, err := HashArtifact(request.EvidenceArtifact)
+	if ledgerFindingsHash != record.Transaction.LedgerFindingsHash {
+		return invalid("frozen ledger findings do not match the authoritative transaction")
+	}
+	evidenceHash, err := hashArtifactSource(request.EvidenceArtifact, request.EvidenceContent)
 	if err != nil {
 		return invalid("verify evidence cannot be hashed: " + err.Error())
 	}
-	fixDeltaHash := EmptyFixDeltaHash
-	if strings.TrimSpace(request.FixDeltaArtifact) != "" {
-		fixDeltaHash, err = HashArtifact(request.FixDeltaArtifact)
-		if err != nil {
-			return invalid("fix delta cannot be hashed: " + err.Error())
-		}
+	fixDeltaHash := record.Transaction.FixDeltaHash
+	if record.Transaction.Snapshot.Kind == TargetFixDiff {
+		fixDeltaHash = FixDeltaHashForSnapshot(record.Transaction.Snapshot)
 	}
 
 	gateContext := GateContext{
@@ -146,9 +153,6 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 		FixDeltaHash: fixDeltaHash, PolicyHash: policyHash, LedgerHash: ledgerHash, EvidenceHash: evidenceHash,
 		BaseRelationshipValid: snapshot.BaseTree == receipt.BaseTree,
 		ExternalEvidence:      request.ExternalEvidence,
-	}
-	if request.Gate == GatePrePR && request.Target.Kind != TargetBaseDiff && request.Target.Kind != TargetExactRevision {
-		return invalid("pre-PR validation requires an explicit base-diff or commit-range target")
 	}
 	if request.Gate == GateRelease {
 		release, err := deriveReleaseEvidence(ctx, repo, request.Release)
@@ -164,6 +168,39 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 	return NativeGateEvaluation{Result: result, Reason: nativeGateReason(result), Context: gateContext}
 }
 
+// lifecycleTargetForGate deliberately derives the candidate from the event's
+// live repository context. A caller-selected historical commit/range may
+// describe review evidence, but it must never authorize a newer HEAD.
+func lifecycleTargetForGate(ctx context.Context, repo string, request GateRequest) (Target, error) {
+	switch request.Gate {
+	case GatePostApply, GatePreCommit, GatePrePush:
+		intended := request.Target.IntendedUntracked
+		if intended == nil {
+			intended = []string{}
+		}
+		return Target{Kind: TargetCurrentChanges, IntendedUntracked: intended}, nil
+	case GatePrePR:
+		if request.Target.Kind != TargetBaseDiff || strings.TrimSpace(request.Target.BaseRef) == "" {
+			return Target{}, errors.New("pre-PR validation requires an explicit base-diff target")
+		}
+		return Target{Kind: TargetBaseDiff, BaseRef: request.Target.BaseRef}, nil
+	case GateRelease:
+		if request.Target.Kind != TargetExactRevision || request.Release == nil {
+			return Target{}, errors.New("release validation requires an exact current release revision")
+		}
+		head, err := runGit(ctx, repo, nil, nil, "rev-parse", "HEAD")
+		if err != nil {
+			return Target{}, err
+		}
+		if strings.TrimSpace(request.Release.Revision) != strings.TrimSpace(string(head)) || request.Target.Revision != request.Release.Revision {
+			return Target{}, errors.New("release revision is not the current HEAD")
+		}
+		return Target{Kind: TargetExactRevision, Revision: request.Release.Revision}, nil
+	default:
+		return Target{}, errors.New("unsupported lifecycle gate")
+	}
+}
+
 func validateGateRequest(request GateRequest) error {
 	if request.Schema != GateRequestSchema {
 		return errors.New("unsupported review gate request schema")
@@ -176,10 +213,10 @@ func validateGateRequest(request GateRequest) error {
 	if !validSHA256(request.StoreRevision) || !validSHA256(request.GenesisRevision) || !validSHA256(request.ChainIdentity) || !validSHA256(request.BundleDigest) {
 		return errors.New("gate request requires the exact authoritative store revision, genesis, chain identity, and bundle digest")
 	}
-	for label, path := range map[string]string{
-		"policy": request.PolicyArtifact, "ledger": request.LedgerArtifact, "evidence": request.EvidenceArtifact,
+	for label, source := range map[string][2]string{
+		"policy": {request.PolicyArtifact, request.PolicyContent}, "ledger": {request.LedgerArtifact, request.LedgerContent}, "evidence": {request.EvidenceArtifact, request.EvidenceContent},
 	} {
-		if strings.TrimSpace(path) == "" {
+		if strings.TrimSpace(source[0]) == "" && strings.TrimSpace(source[1]) == "" {
 			return fmt.Errorf("gate request requires %s artifact", label)
 		}
 	}
@@ -245,23 +282,47 @@ func deriveReleaseEvidence(ctx context.Context, repo string, request *ReleaseReq
 }
 
 func hashLedgerArtifact(path string) (string, error) {
+	hash, _, err := hashLedgerArtifactBinding(path)
+	return hash, err
+}
+
+func hashArtifactSource(path, content string) (string, error) {
+	if strings.TrimSpace(content) != "" {
+		sum := sha256.Sum256([]byte(content))
+		return "sha256:" + hex.EncodeToString(sum[:]), nil
+	}
+	return HashArtifact(path)
+}
+
+func hashLedgerArtifactSource(path, content string) (string, string, error) {
+	if strings.TrimSpace(content) == "" {
+		return hashLedgerArtifactBinding(path)
+	}
+	return hashLedgerPayload([]byte(content))
+}
+
+func hashLedgerArtifactBinding(path string) (string, string, error) {
 	payload, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
+	return hashLedgerPayload(payload)
+}
+
+func hashLedgerPayload(payload []byte) (string, string, error) {
 	var envelope struct {
-		Schema   string            `json:"schema"`
-		Findings []json.RawMessage `json:"findings"`
+		Schema   string    `json:"schema"`
+		Findings []Finding `json:"findings"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	if err := decoder.Decode(&envelope); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if envelope.Schema != "gentle-ai.review-ledger/v1" || envelope.Findings == nil {
-		return "", errors.New("ledger requires gentle-ai.review-ledger/v1 and an explicit findings array")
+		return "", "", errors.New("ledger requires gentle-ai.review-ledger/v1 and an explicit findings array")
 	}
 	sum := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	return "sha256:" + hex.EncodeToString(sum[:]), findingsHash(envelope.Findings), nil
 }
 
 func HashLedgerArtifact(path string) (string, error) {

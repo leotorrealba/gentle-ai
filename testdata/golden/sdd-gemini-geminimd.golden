@@ -128,6 +128,7 @@ Only `approved | escalated` are terminal transaction states. `scope-changed | in
 OpenSpec mode persists exact machine-readable artifacts:
 
 - `openspec/changes/{change-name}/reviews/transaction.json`
+- `openspec/changes/{change-name}/reviews/policy.md`
 - `openspec/changes/{change-name}/reviews/ledger.json`
 - `openspec/changes/{change-name}/reviews/receipt.json`
 - `openspec/changes/{change-name}/reviews/chain-bundle.json`
@@ -142,16 +143,17 @@ Writers use a non-blocking cross-platform OS lock with token/PID/host/timestamp 
 Engram mode upserts the equivalent exact topics:
 
 - `sdd/{change-name}/review/transaction`
+- `sdd/{change-name}/review/policy`
 - `sdd/{change-name}/review/ledger`
 - `sdd/{change-name}/review/receipt`
 - `sdd/{change-name}/review/chain-bundle`
 - `sdd/{change-name}/review/gate-context`
 
-Ad-hoc review uses `review/{target-slug}/{transaction|ledger|receipt|chain-bundle|gate-context}`. If no artifact store exists, keep all artifacts inline for the current session and never claim durable receipt reuse.
+Ad-hoc review uses `review/{target-slug}/{transaction|policy|ledger|receipt|chain-bundle|gate-context}`. If no artifact store exists, keep all artifacts inline for the current session and never claim durable receipt reuse.
 
 Post-implementation/post-apply starts ordinary review only when no valid receipt exists. Pre-commit, pre-push, pre-PR, release, and SDD archive call the native receipt validator for the same content-bound receipt; they never create a budget or silently launch Judgment Day. Gate context binds expected HEAD, genesis, ordered chain identity, and bundle digest. The validator derives the authoritative store root, validates the complete semantic chain, derives the current repository target, and hashes policy, ledger, fix delta, verify evidence, and release artifacts from persisted inputs; caller-authored store paths, transactions, trees, or hash assertions are never authoritative. Missing, `scope-changed`, `invalidated`, and `escalated` results emit machine-readable denial and return non-success.
 
-For clean-clone/workstation recovery, persist the full ordered content-addressed chain bundle. Explicit `review-bundle-import` MUST validate bundle digest, every event hash/predecessor/semantic transition, lineage/generation, initial/final snapshot identities, current repository snapshot, policy/ledger/evidence, terminal receipt, and expected gate chain identity before CAS installation into the repository-derived destination. `review-validate` never auto-imports. Tampered, truncated, wrong-lineage, wrong-snapshot, arbitrary alternate-store, or unbound bundles remain untrusted and fail closed.
+For clean-clone/workstation recovery, persist the full ordered content-addressed chain bundle. Explicit `review-bundle-import` MUST validate bundle digest, every event hash/predecessor/semantic transition, lineage/generation/mode, initial/final snapshot identities, terminal fix-diff semantics, and expected gate chain identity before CAS installation into the repository-derived destination. Recovery is delivered-content equivalence, not snapshot-structure equivalence: the current derived candidate and delivered path digest MUST match `final_candidate_tree` and the receipt/lineage path scope; the authoritative intended-untracked proof MUST reproduce from that candidate; and policy, ledger, evidence, fix delta, receipt, and chain bindings MUST match exactly. The terminal fix-diff kind, base, ledger IDs, and identity remain preserved for audit, but the recovery snapshot need not share its kind, base, or identity. `review-validate` never auto-imports. Tampered content, wrong path scope/artifacts, truncated or tampered chains, different lineages, arbitrary alternate stores, or unbound bundles remain untrusted and fail closed.
 
 Release validation additionally requires an immutable release tree plus content hashes for configuration, generated artifacts, provenance/signing, publication boundary, and evidence freshness. Publication boundary state must be sealed and evidence freshness state must be current; a generic base-relationship context cannot authorize publication.
 

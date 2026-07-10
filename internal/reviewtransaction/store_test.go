@@ -353,6 +353,28 @@ func TestValidateSuccessorEnforcesReleaseBindingTimingAndImmutability(t *testing
 	}
 }
 
+func TestValidateSuccessorAllowsReleaseBindAfterJSONNormalizesEmptyCollections(t *testing.T) {
+	previous := newTestTransaction(t, ModeOrdinary4R)
+	if err := previous.StartReview(); err != nil {
+		t.Fatal(err)
+	}
+	if err := previous.FreezeFindings([]Finding{}, hash("1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := previous.ClassifyEvidence([]FindingEvidence{}); err != nil {
+		t.Fatal(err)
+	}
+	previous.Snapshot.LedgerIDs = nil
+	next := *previous
+	next.Snapshot.LedgerIDs = []string{}
+	if err := next.BindReleaseEvidence(testReleaseEvidence(next.FinalCandidateTree)); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSuccessor(*previous, next, "review/bind-release-evidence"); err != nil {
+		t.Fatalf("validateSuccessor() rejected semantically identical JSON-normalized release bind: %v", err)
+	}
+}
+
 func TestStoreLoadRejectsIncompleteAndIllegalPredecessorChains(t *testing.T) {
 	approved := approvedStoreTransaction(t, "chain-lineage")
 	reviewing := newTestTransaction(t, ModeOrdinary4R)

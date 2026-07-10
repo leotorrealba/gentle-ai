@@ -154,7 +154,7 @@ func TestResolveArchiveRequiresApprovedExactReviewReceipt(t *testing.T) {
 
 func TestReviewArtifactPathsUseExactOpenSpecAndEngramReferences(t *testing.T) {
 	changeRoot := t.TempDir()
-	for _, name := range []string{"transaction.json", "ledger.json", "receipt.json", "chain-bundle.json", "gate-context.json"} {
+	for _, name := range []string{"transaction.json", "policy.md", "ledger.json", "receipt.json", "chain-bundle.json", "gate-context.json"} {
 		write(t, filepath.Join(changeRoot, "reviews", name), "{}\n")
 	}
 	paths, err := resolveArtifactPaths(changeRoot)
@@ -167,9 +167,13 @@ func TestReviewArtifactPathsUseExactOpenSpecAndEngramReferences(t *testing.T) {
 	if got := firstPath(paths.ReviewLedger); got != filepath.Join(changeRoot, "reviews", "ledger.json") {
 		t.Fatalf("OpenSpec ledger path = %q", got)
 	}
+	if got := firstPath(paths.ReviewPolicy); got != filepath.Join(changeRoot, "reviews", "policy.md") {
+		t.Fatalf("OpenSpec policy path = %q", got)
+	}
 
 	engram := engramArtifactPaths("bounded", map[string]engramObservation{
 		"review/transaction":  {Title: "sdd/bounded/review/transaction", Content: "{}"},
+		"review/policy":       {Title: "sdd/bounded/review/policy", Content: "policy"},
 		"review/ledger":       {Title: "sdd/bounded/review/ledger", Content: "{}"},
 		"review/receipt":      {Title: "sdd/bounded/review/receipt", Content: "{}"},
 		"review/chain-bundle": {Title: "sdd/bounded/review/chain-bundle", Content: "{}"},
@@ -178,6 +182,7 @@ func TestReviewArtifactPathsUseExactOpenSpecAndEngramReferences(t *testing.T) {
 	for label, got := range map[string]string{
 		"transaction":  firstPath(engram.ReviewState),
 		"ledger":       firstPath(engram.ReviewLedger),
+		"policy":       firstPath(engram.ReviewPolicy),
 		"receipt":      firstPath(engram.ReviewReceipt),
 		"chain-bundle": firstPath(engram.ReviewBundle),
 		"context":      firstPath(engram.ReviewContext),
@@ -210,32 +215,15 @@ func TestEngramReviewArtifactDiscoveryRetainsOnlyExactNames(t *testing.T) {
 	}
 }
 
-func TestResolveEngramArchiveReceivesExactChainBundle(t *testing.T) {
+func TestResolveEngramArchiveRecoversRetainedPolicyWithoutSourceArtifacts(t *testing.T) {
 	root := t.TempDir()
 	changeRoot := seedBoundedReadyChange(t, root)
 	writeApprovedReviewArtifacts(t, changeRoot)
 	mkdir(t, filepath.Join(root, ".engram"))
 	project := strings.ToLower(filepath.Base(root))
-	observation := func(title, path string) engramObservation {
-		t.Helper()
-		payload, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return engramObservation{Title: title, Content: string(payload), Project: project, Scope: "project"}
-	}
-	observations := []engramObservation{
-		observation("sdd/thin/proposal", filepath.Join(changeRoot, "proposal.md")),
-		observation("sdd/thin/spec", filepath.Join(changeRoot, "specs", "auth", "spec.md")),
-		observation("sdd/thin/design", filepath.Join(changeRoot, "design.md")),
-		observation("sdd/thin/tasks", filepath.Join(changeRoot, "tasks.md")),
-		{Title: "sdd/thin/apply-progress", Content: "all work units complete", Project: project, Scope: "project"},
-		observation("sdd/thin/verify-report", filepath.Join(changeRoot, "verify-report.md")),
-		observation("sdd/thin/review/transaction", filepath.Join(changeRoot, "reviews", "transaction.json")),
-		observation("sdd/thin/review/ledger", filepath.Join(changeRoot, "reviews", "ledger.json")),
-		observation("sdd/thin/review/receipt", filepath.Join(changeRoot, "reviews", "receipt.json")),
-		observation("sdd/thin/review/chain-bundle", filepath.Join(changeRoot, "reviews", "chain-bundle.json")),
-		observation("sdd/thin/review/gate-context", filepath.Join(changeRoot, "reviews", "gate-context.json")),
+	observations := boundedEngramObservations(t, project, changeRoot)
+	if err := os.RemoveAll(filepath.Join(changeRoot, "reviews")); err != nil {
+		t.Fatal(err)
 	}
 	restore := stubEngramExport(t, observations)
 	defer restore()
@@ -252,6 +240,61 @@ func TestResolveEngramArchiveReceivesExactChainBundle(t *testing.T) {
 	}
 	if status.ReviewGate == nil || status.ReviewGate.Result != reviewtransaction.GateAllow || status.Dependencies.Archive != DependencyReady || status.NextRecommended != "archive" {
 		t.Fatalf("Engram archive status = gate=%#v archive=%q next=%q", status.ReviewGate, status.Dependencies.Archive, status.NextRecommended)
+	}
+}
+
+func TestResolveEngramArchiveRejectsTamperedRetainedPolicy(t *testing.T) {
+	root := t.TempDir()
+	changeRoot := seedBoundedReadyChange(t, root)
+	writeApprovedReviewArtifacts(t, changeRoot)
+	mkdir(t, filepath.Join(root, ".engram"))
+	observations := boundedEngramObservations(t, strings.ToLower(filepath.Base(root)), changeRoot)
+	for index := range observations {
+		if observations[index].Title == "sdd/thin/review/policy" {
+			observations[index].Content = "tampered policy\n"
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(changeRoot, "reviews")); err != nil {
+		t.Fatal(err)
+	}
+	restore := stubEngramExport(t, observations)
+	defer restore()
+
+	status, ok, err := resolveEngramStatus(root, "thin", false)
+	if err != nil {
+		t.Fatalf("resolveEngramStatus() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("resolveEngramStatus() did not retain the Engram change")
+	}
+	if status.ReviewGate == nil || status.ReviewGate.Result != reviewtransaction.GateInvalidated || status.Dependencies.Archive != DependencyBlocked {
+		t.Fatalf("tampered Engram policy status = gate=%#v archive=%q", status.ReviewGate, status.Dependencies.Archive)
+	}
+}
+
+func boundedEngramObservations(t *testing.T, project, changeRoot string) []engramObservation {
+	t.Helper()
+	observation := func(title, path string) engramObservation {
+		t.Helper()
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return engramObservation{Title: title, Content: string(payload), Project: project, Scope: "project"}
+	}
+	return []engramObservation{
+		observation("sdd/thin/proposal", filepath.Join(changeRoot, "proposal.md")),
+		observation("sdd/thin/spec", filepath.Join(changeRoot, "specs", "auth", "spec.md")),
+		observation("sdd/thin/design", filepath.Join(changeRoot, "design.md")),
+		observation("sdd/thin/tasks", filepath.Join(changeRoot, "tasks.md")),
+		{Title: "sdd/thin/apply-progress", Content: "all work units complete", Project: project, Scope: "project"},
+		observation("sdd/thin/verify-report", filepath.Join(changeRoot, "verify-report.md")),
+		observation("sdd/thin/review/transaction", filepath.Join(changeRoot, "reviews", "transaction.json")),
+		observation("sdd/thin/review/policy", filepath.Join(changeRoot, "reviews", "policy.md")),
+		observation("sdd/thin/review/ledger", filepath.Join(changeRoot, "reviews", "ledger.json")),
+		observation("sdd/thin/review/receipt", filepath.Join(changeRoot, "reviews", "receipt.json")),
+		observation("sdd/thin/review/chain-bundle", filepath.Join(changeRoot, "reviews", "chain-bundle.json")),
+		observation("sdd/thin/review/gate-context", filepath.Join(changeRoot, "reviews", "gate-context.json")),
 	}
 }
 
