@@ -228,13 +228,7 @@ func TestWriteSharedPromptFilesContent(t *testing.T) {
 }
 
 func TestWriteSharedPromptFilesLanguageContract(t *testing.T) {
-	home := t.TempDir()
-
-	if _, err := WriteSharedPromptFiles(home, nil); err != nil {
-		t.Fatalf("WriteSharedPromptFiles() error = %v", err)
-	}
-
-	for _, fileName := range []string{
+	phases := []string{
 		"sdd-init.md",
 		"sdd-explore.md",
 		"sdd-propose.md",
@@ -245,20 +239,34 @@ func TestWriteSharedPromptFilesLanguageContract(t *testing.T) {
 		"sdd-verify.md",
 		"sdd-archive.md",
 		"sdd-onboard.md",
-	} {
-		t.Run(fileName, func(t *testing.T) {
-			path := filepath.Join(SharedPromptDir(home), fileName)
-			content, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+
+	for _, capability := range []string{"capable", "small"} {
+		t.Run(capability, func(t *testing.T) {
+			home := t.TempDir()
+			phaseCapabilities := make(map[string]string, len(phases))
+			for _, fileName := range phases {
+				phaseCapabilities[strings.TrimSuffix(fileName, ".md")] = capability
 			}
-			text := string(content)
-			for _, required := range []string{
-				"Generated technical artifacts default to English",
-				"If Spanish technical artifacts are explicitly requested, use neutral/professional Spanish",
-			} {
-				if !strings.Contains(text, required) {
-					t.Fatalf("%s missing delegated prompt language contract %q", fileName, required)
+			if _, err := WriteSharedPromptFiles(home, phaseCapabilities); err != nil {
+				t.Fatalf("WriteSharedPromptFiles(%s) error = %v", capability, err)
+			}
+
+			for _, fileName := range phases {
+				path := filepath.Join(SharedPromptDir(home), fileName)
+				content, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("ReadFile(%q) error = %v", path, err)
+				}
+				text := string(content)
+				for _, required := range []string{
+					"Generated technical artifacts default to English",
+					"If technical artifacts are explicitly requested in another language, use a neutral/professional register",
+					"Public/contextual comments follow the target context language",
+				} {
+					if !strings.Contains(text, required) {
+						t.Fatalf("%s/%s missing delegated prompt language contract %q", capability, fileName, required)
+					}
 				}
 			}
 		})

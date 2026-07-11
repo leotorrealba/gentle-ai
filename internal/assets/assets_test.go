@@ -16,7 +16,7 @@ func TestOrchestratorsRequireNonSkippableGeneralDelegationTriggers(t *testing.T)
 	requiredControls := []string{
 		"Mandatory Delegation Triggers",
 		"non-skippable hard gates",
-		"TOTALMENTE obligatorio",
+		"fully mandatory",
 		"4-file rule",
 		"Multi-file write rule",
 		"Lifecycle receipt rule",
