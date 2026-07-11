@@ -30,32 +30,40 @@ type NativeGateRequestInput struct {
 }
 
 func BuildNativeGateRequest(ctx context.Context, repo string, input NativeGateRequestInput) (GateRequest, error) {
-	if strings.TrimSpace(input.LineageID) == "" || strings.TrimSpace(input.BundleArtifact) == "" {
-		return GateRequest{}, errors.New("native gate request requires lineage and bundle artifact")
+	if strings.TrimSpace(input.LineageID) == "" {
+		return GateRequest{}, errors.New("native gate request requires lineage")
 	}
 	store, err := AuthoritativeStore(ctx, repo, input.LineageID)
 	if err != nil {
 		return GateRequest{}, fmt.Errorf("derive authoritative review store: %w", err)
 	}
-	authoritative, err := store.ExportBundle()
+	chain, err := store.LoadChain()
 	if err != nil {
-		return GateRequest{}, fmt.Errorf("export authoritative review bundle: %w", err)
+		return GateRequest{}, fmt.Errorf("load authoritative review chain: %w", err)
 	}
-	payload, err := os.ReadFile(input.BundleArtifact)
-	if err != nil {
-		return GateRequest{}, fmt.Errorf("read review bundle artifact: %w", err)
-	}
-	named, err := ParseChainBundle(payload)
-	if err != nil {
-		return GateRequest{}, fmt.Errorf("parse review bundle artifact: %w", err)
-	}
-	if !reflect.DeepEqual(named, authoritative) {
-		return GateRequest{}, errors.New("named review bundle does not match the authoritative repository chain")
+	bundleDigest := chain.Identity
+	if strings.TrimSpace(input.BundleArtifact) != "" {
+		authoritative, err := store.ExportBundle()
+		if err != nil {
+			return GateRequest{}, fmt.Errorf("export authoritative review bundle: %w", err)
+		}
+		payload, err := os.ReadFile(input.BundleArtifact)
+		if err != nil {
+			return GateRequest{}, fmt.Errorf("read review bundle artifact: %w", err)
+		}
+		named, err := ParseChainBundle(payload)
+		if err != nil {
+			return GateRequest{}, fmt.Errorf("parse review bundle artifact: %w", err)
+		}
+		if !reflect.DeepEqual(named, authoritative) {
+			return GateRequest{}, errors.New("named review bundle does not match the authoritative repository chain")
+		}
+		bundleDigest = authoritative.BundleDigest
 	}
 	request := GateRequest{
 		Schema: GateRequestSchema, Gate: input.Gate,
-		StoreRevision: authoritative.HeadRevision, GenesisRevision: authoritative.GenesisRevision,
-		ChainIdentity: authoritative.ChainIdentity, BundleDigest: authoritative.BundleDigest,
+		StoreRevision: chain.HeadRevision, GenesisRevision: chain.GenesisRevision,
+		ChainIdentity: chain.Identity, BundleDigest: bundleDigest,
 		PolicyArtifact: input.PolicyArtifact, LedgerArtifact: input.LedgerArtifact,
 		FixDeltaArtifact: input.FixDeltaArtifact, EvidenceArtifact: input.EvidenceArtifact,
 	}
@@ -63,7 +71,11 @@ func BuildNativeGateRequest(ctx context.Context, repo string, input NativeGateRe
 	case GatePostApply, GatePreCommit:
 		intended := input.IntendedUntracked
 		if intended == nil {
-			intended = []string{}
+			transaction := chain.Records[len(chain.Records)-1].Transaction
+			intended = append([]string(nil), transaction.Snapshot.IntendedUntracked...)
+			if intended == nil {
+				intended = []string{}
+			}
 		}
 		request.Target = Target{Kind: TargetCurrentChanges, IntendedUntracked: intended}
 	case GatePrePush:
@@ -108,15 +120,11 @@ func BuildNativeGateRequest(ctx context.Context, repo string, input NativeGateRe
 	if err != nil {
 		return GateRequest{}, err
 	}
-	terminal := authoritative.Events[len(authoritative.Events)-1]
-	record, err := parseRecordPayload(terminal.Payload)
-	if err != nil {
-		return GateRequest{}, fmt.Errorf("parse authoritative terminal review event: %w", err)
-	}
-	if _, err := validateFixDeltaArtifact(preimages.fixDelta, record.Transaction); err != nil {
-		return GateRequest{}, err
-	}
-	if len(preimages.fixDelta) != 0 {
+	if strings.TrimSpace(input.FixDeltaArtifact) != "" {
+		transaction := chain.Records[len(chain.Records)-1].Transaction
+		if _, err := validateFixDeltaArtifact(preimages.fixDelta, transaction); err != nil {
+			return GateRequest{}, err
+		}
 		request.FixDeltaContent = string(preimages.fixDelta)
 	}
 	request.preimages = &preimages

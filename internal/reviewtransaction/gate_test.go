@@ -32,6 +32,31 @@ func TestNativePrePRGateAllowsOnlyCryptographicallyAttestedCompatibleBaseAdvance
 	}
 }
 
+func TestOrdinaryBoundedCompatibleBaseAdvancePreservesFrozenRiskInputs(t *testing.T) {
+	fixture := newCompatiblePrePRFixtureMode(t, "delivery.txt", "base-only.txt", ModeOrdinaryBounded)
+	store, err := AuthoritativeStore(context.Background(), fixture.repo, fixture.receipt.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, beforeHead, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluation := EvaluateNativeGate(context.Background(), fixture.repo, fixture.receipt, fixture.request)
+	if evaluation.Result != GateAllow || evaluation.Context.BaseAdvance == nil || !evaluation.Context.BaseAdvance.Compatible {
+		t.Fatalf("bounded compatible base advance = %#v", evaluation)
+	}
+	after, afterHead, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeHead != afterHead || before.Transaction.RiskLevel != RiskMedium || after.Transaction.RiskLevel != before.Transaction.RiskLevel ||
+		before.Transaction.OriginalChangedLines == nil || after.Transaction.OriginalChangedLines == nil || *after.Transaction.OriginalChangedLines != *before.Transaction.OriginalChangedLines ||
+		before.Transaction.CorrectionBudget == nil || after.Transaction.CorrectionBudget == nil || *after.Transaction.CorrectionBudget != *before.Transaction.CorrectionBudget {
+		t.Fatalf("compatible advance changed bounded authority: before=%q/%#v after=%q/%#v", beforeHead, before.Transaction, afterHead, after.Transaction)
+	}
+}
+
 func TestPrePRGateFailsClosedForUnprovenBaseAdvance(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -41,6 +66,7 @@ func TestPrePRGateFailsClosedForUnprovenBaseAdvance(t *testing.T) {
 		want         GateResult
 	}{
 		{name: "missing attestation", mutate: func(t *testing.T, fixture *compatiblePrePRFixture) { fixture.request.PrePR = nil }, want: GateScopeChanged},
+		{name: "missing receipt-bound trust policy", mutate: func(t *testing.T, fixture *compatiblePrePRFixture) { fixture.request.PolicyArtifact = "" }, want: GateScopeChanged},
 		{name: "invalid signature", mutate: func(t *testing.T, fixture *compatiblePrePRFixture) {
 			fixture.attestation.Signature = base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
 			fixture.writeAttestation(t)
@@ -282,6 +308,10 @@ type compatiblePrePRFixture struct {
 }
 
 func newCompatiblePrePRFixture(t *testing.T, deliveryPath, basePath string) *compatiblePrePRFixture {
+	return newCompatiblePrePRFixtureMode(t, deliveryPath, basePath, ModeOrdinary4R)
+}
+
+func newCompatiblePrePRFixtureMode(t *testing.T, deliveryPath, basePath string, mode Mode) *compatiblePrePRFixture {
 	t.Helper()
 	repo := initSnapshotRepo(t)
 	baseCommit := trimGit(gitSnapshot(t, repo, "rev-parse", "HEAD"))
@@ -316,11 +346,31 @@ func newCompatiblePrePRFixture(t *testing.T, deliveryPath, basePath string) *com
 	ledgerHash, _ := HashLedgerArtifact(ledgerPath)
 	ledgerPayload, _ := os.ReadFile(ledgerPath)
 	evidenceHash, _ := HashArtifact(evidencePath)
-	tx, err := NewTransaction(Start{LineageID: "compatible-base", Mode: ModeOrdinary4R, Generation: 1, Snapshot: snapshot, PolicyHash: policyHash})
+	start := Start{LineageID: "compatible-base", Mode: mode, Generation: 1, Snapshot: snapshot, PolicyHash: policyHash}
+	if mode == ModeOrdinaryBounded {
+		risk, changedLines, classifyErr := (SnapshotBuilder{Repo: repo}).ClassifySnapshotRisk(context.Background(), snapshot)
+		if classifyErr != nil {
+			t.Fatal(classifyErr)
+		}
+		start.RiskLevel = risk
+		start.OriginalChangedLines = &changedLines
+		switch risk {
+		case RiskMedium:
+			start.SelectedLenses = []string{LensReliability}
+		case RiskHigh:
+			start.SelectedLenses = append([]string(nil), supportedLenses...)
+		}
+	}
+	tx, err := NewTransaction(start)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = tx.StartReview()
+	for _, lens := range tx.SelectedLenses {
+		if err := tx.RecordLensResult(LensResult{Lens: lens, Findings: []Finding{}, Evidence: []string{"completed " + lens + " sweep"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	_ = tx.FreezeFindings([]Finding{}, ledgerPayload, ledgerHash)
 	_, _ = tx.ClassifyEvidence([]FindingEvidence{})
 	_ = tx.BeginFinalVerification()
@@ -843,6 +893,11 @@ func approvedEmptyCurrentChangesGateFixture(t *testing.T, lineage string) (strin
 func appendApprovedStoreChain(t *testing.T, store Store, approved Transaction) string {
 	t.Helper()
 	reviewing := approved
+	lensResults := append([]LensResult(nil), approved.LensResults...)
+	reviewing.LensResults = nil
+	for _, lens := range supportedLenses {
+		setLensCounter(&reviewing.Counters, lens, 0)
+	}
 	reviewing.State = StateReviewing
 	reviewing.LedgerHash = ""
 	reviewing.EvidenceHash = ""
@@ -851,6 +906,15 @@ func appendApprovedStoreChain(t *testing.T, store Store, approved Transaction) s
 	revision, err := store.Append("", Record{Operation: "review/start", Transaction: reviewing})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, result := range lensResults {
+		if err := reviewing.RecordLensResult(result); err != nil {
+			t.Fatal(err)
+		}
+		revision, err = store.Append(revision, Record{Operation: "review/record-lens-result", Transaction: reviewing})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	frozen := reviewing
 	ledger, err := CanonicalLedger([]Finding{})

@@ -85,6 +85,31 @@ func TestReceiptParserIsStrictAndTerminalVocabularyIsClosed(t *testing.T) {
 	}
 }
 
+func TestReceiptRemainsCompatibleWithoutCausalRoutingFields(t *testing.T) {
+	tx := newTestTransaction(t, ModeOrdinary4R)
+	_ = tx.StartReview()
+	_ = freezeTestFindings(tx, []Finding{{ID: "R1-PRE", Severity: "CRITICAL", Claim: "pre-existing defect"}})
+	_, _ = tx.ClassifyEvidence([]FindingEvidence{{
+		FindingID: "R1-PRE", Class: EvidenceDeterministic, Causality: CausalPreExisting, Proof: "same failure on base and candidate",
+	}})
+	_ = tx.BeginFinalVerification()
+	_ = tx.CompleteFinalVerification(hash("2"), true)
+	receipt, err := tx.Receipt()
+	if err != nil {
+		t.Fatalf("Receipt() error = %v", err)
+	}
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "causal_disposition") || strings.Contains(string(payload), "follow_ups") {
+		t.Fatalf("causal routing expanded receipt schema: %s", payload)
+	}
+	if _, err := ParseReceipt(payload); err != nil {
+		t.Fatalf("ParseReceipt() error = %v", err)
+	}
+}
+
 func TestNewLineageRequiresExplicitDifferentIdentity(t *testing.T) {
 	start := Start{LineageID: "lineage-1", Mode: ModeOrdinary4R, Generation: 1, Snapshot: newTestTransaction(t, ModeOrdinary4R).Snapshot, PolicyHash: hash("d")}
 	if _, err := NewLineage("lineage-1", start); err == nil {

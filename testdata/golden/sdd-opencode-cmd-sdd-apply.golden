@@ -37,42 +37,19 @@ If all gates pass, launch the hidden `sdd-apply` sub-agent with:
 Return a structured orchestration result with: status, executive_summary, artifacts, next_recommended, risks, and skill_resolution.
 
 POST-APPLY REVIEW ROUTING:
-After apply returns, rerun native status. If `nextRecommended: review`, the parent orchestrator builds the explicit intended-untracked manifest and runs `gentle-ai review-start ... --cwd <repo> --lineage <id>`. The repository Git common directory plus canonical lineage ID determines the authoritative CAS store. The apply executor never launches review.
+After apply returns, rerun native status. If `nextRecommended: review`, the parent orchestrator runs `gentle-ai review start --cwd <repo>`. The facade derives repository scope, lineage, tier, lenses, and correction budget from live Git. The apply executor never launches review.
 
 ### Authority-First Terminal Procedure
 
-Hashes cannot reconstruct policy, ledger, or verification-evidence bytes. Preserve the exact canonical policy and ledger preimages before review starts, and retain them with the exact independent verification-evidence preimage until native validation finishes. Materializing an ephemeral private native input is not mirror persistence.
+Use only the compact facade; it appends and reads back native authority before materializing existing compatibility artifacts.
 
-#### Authoritative Review
-
-| Order | Operation | Required authoritative result | Terminal mirrors |
+| Order | Operation | Required result | Terminal mirrors |
 |---|---|---|---|
-| 01 | `preserve-preimages` | Hold exact policy and canonical native ledger bytes; hold selected-lens results in memory. | blocked |
-| 02 | `review-start` | Append `review/start`, then run `review-resume` and verify the start revision, lineage, target identity, genesis, and ordered chain identity. | blocked |
-| 03 | `record-lens-result` | Execute each selected lens exactly once and append/read back every required canonical result in selected order. | blocked |
-| 04 | `freeze-findings` | Materialize ledger bytes only as an ephemeral private input; append/read back the validated canonical ledger and its computed identity. | blocked |
-| 05 | `classify-evidence` | Append/read back exact evidence classes and authoritative outcomes for the frozen findings. | blocked |
+| 01 | `gentle-ai review start` | target, tier, lenses, and budget bound | blocked |
+| 02 | `gentle-ai review finalize` | results, evidence, native transitions, and receipt bound | blocked |
+| 03 | `gentle-ai review validate --gate <gate> --cwd <repo>` | authority, receipt, and live Git checked | blocked |
+| 04 | `reconcile-terminal-mirrors` | existing mirrors reconciled | allowed |
 
-#### Independent Final Verification
-
-| Order | Operation | Required authoritative result | Terminal mirrors |
-|---|---|---|---|
-| 06 | `review-resume-preterminal` | Verify lineage, target identity, ordered chain identity, findings, evidence classes, counters, and bound canonical ledger identity. | blocked |
-| 07 | `begin-final-verification` | Append/read back final-verification start without requiring a receipt, bundle, gate context, or other terminal-only artifact. | blocked |
-| 08 | `independent-final-verification` | Verify requirements and runtime using only the preterminal transaction plus preserved policy and ledger; retain the exact canonical evidence bytes. | blocked |
-| 09 | `complete-final-verification` | Hash the retained evidence preimage, append completion, and preserve the same bytes for the gate. | blocked |
-| 10 | `review-resume-terminal` | Reload CAS and verify terminal state, revision, genesis, ordered chain identity, counters, and policy/ledger/evidence bindings. | blocked |
-
-#### Terminal Materialization and Gate
-
-| Order | Operation | Required authoritative result | Terminal mirrors |
-|---|---|---|---|
-| 11 | `review-bundle-export` | Export the validated terminal chain and capture its emitted store revision, genesis revision, chain identity, and bundle digest. The bundle remains non-authoritative transport. | blocked |
-| 12 | `extract-terminal-receipt` | Structurally extract and materialize the bundle's natively produced `terminal_receipt`; extraction is allowed but does not authorize a gate. | blocked |
-| 13 | `construct-gate-request` | Build `GateRequest` from emitted identities, target identity, and preserved policy/ledger/evidence artifacts or content; hash-check every preimage against terminal bindings. | blocked |
-| 14 | `review-validate` | Validate the materialized receipt and request. Native validation derives the repository store and reloads authoritative CAS; it never trusts the bundle or mirrors as authority. | blocked |
-| 15 | `reconcile-terminal-mirrors` | Only after `review-validate` returns allow, finalize or reconcile OpenSpec/Engram transaction, ledger, evidence, receipt, bundle, and gate-context mirrors from validated native state. | allowed |
-
-No mirror mutation may precede its confirmed authority boundary; no terminal mirror may finalize before terminal readback and successful native validation. A failed append leaves mirrors at the last confirmed authoritative state. If machine output or post-append readback fails after an append committed, recover with `review-resume`, never `review-start` or a new budget. Empty and non-empty ledgers use the same procedure. Approved or escalated lineages are immutable, and an existing malformed lineage remains invalid and requires an explicit replacement lineage rather than history rewriting.
+After ambiguous output, rerun the same facade operation; native discovery resumes committed authority without another budget. Malformed or ambiguous lineage remains invalid.
 
 Reuse a valid receipt; later commit/push/PR/release events only validate it.

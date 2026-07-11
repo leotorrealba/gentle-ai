@@ -2,6 +2,7 @@ package sddstatus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,122 +123,49 @@ func resolveBoundedRemediation(required bool, verify verifyResultEvaluation, tra
 func applyReviewGate(
 	status *Status,
 	repo string,
-	receiptPath, bundlePath, requestPath, transactionPath, policyPath, ledgerPath, verifyPath string,
-	receiptContent, bundleContent, requestContent, transactionContent, policyContent, ledgerContent, verifyContent string,
+	receiptPath, receiptContent string,
 ) {
 	if status.Dependencies.Verify != DependencyAllDone || !status.TaskProgress.AllComplete {
 		return
 	}
 	receiptPayload, ok := readReviewArtifact(receiptPath, receiptContent)
 	if !ok {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "approved review receipt is missing")
-		return
-	}
-	receipt, err := reviewtransaction.ParseReceipt(receiptPayload)
-	if err != nil {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, fmt.Sprintf("review receipt is invalid or non-terminal: %v", err))
-		return
-	}
-	bundlePayload, ok := readReviewArtifact(bundlePath, bundleContent)
-	if !ok {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "portable review chain bundle is missing")
-		return
-	}
-	bundle, err := reviewtransaction.ParseChainBundle(bundlePayload)
-	if err != nil || bundle.TerminalReceipt == nil || !reflect.DeepEqual(*bundle.TerminalReceipt, receipt) {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "portable review chain bundle is invalid or does not bind the terminal receipt")
-		return
-	}
-	transactionPayload, ok := readReviewArtifact(transactionPath, transactionContent)
-	if !ok {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "non-authoritative bounded review transaction mirror is missing")
-		return
-	}
-	transaction, err := reviewtransaction.ParseTransaction(transactionPayload)
-	if err != nil {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, fmt.Sprintf("bounded review transaction is invalid: %v", err))
-		return
-	}
-	transactionReceipt, err := transaction.Receipt()
-	if err != nil || !reflect.DeepEqual(transactionReceipt, receipt) {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "receipt does not match the persisted terminal review transaction")
-		return
-	}
-	if _, ok := readReviewArtifact(ledgerPath, ledgerContent); !ok {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "persisted frozen review ledger is missing")
-		return
-	}
-	if _, ok := readReviewArtifact(policyPath, policyContent); !ok {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "persisted review policy is missing")
-		return
-	}
-	if _, ok := readReviewArtifact(verifyPath, verifyContent); !ok {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "current structured verify evidence is missing")
-		return
-	}
-	requestPayload, ok := readReviewArtifact(requestPath, requestContent)
-	if !ok {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "review gate request is missing")
-		return
-	}
-	request, err := reviewtransaction.ParseGateRequest(requestPayload)
-	if err != nil {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, fmt.Sprintf("review gate request is invalid: %v", err))
-		return
-	}
-	// Engram retains artifact bytes even after an OpenSpec workspace has been
-	// cleaned. Feed those bytes to the native gate instead of treating virtual
-	// topic names as filesystem paths.
-	if ledgerPath == "" {
-		request.LedgerContent = ledgerContent
-	}
-	if policyPath == "" {
-		request.PolicyContent = policyContent
-	}
-	if verifyPath == "" {
-		request.EvidenceContent = verifyContent
-	}
-	if request.StoreRevision != bundle.HeadRevision || request.GenesisRevision != bundle.GenesisRevision || request.ChainIdentity != bundle.ChainIdentity || request.BundleDigest != bundle.BundleDigest {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "gate request does not bind the portable review chain bundle identity")
-		return
-	}
-	if request.Gate != reviewtransaction.GatePostApply {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "archive readiness requires a post-apply gate request; explicit maintainer action is required")
-		return
-	}
-	request.Target.Kind = reviewtransaction.TargetCurrentChanges
-	request.Target.BaseRef = ""
-	request.Target.Revision = ""
-	if transaction.Snapshot.IntendedUntracked == nil {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "persisted transaction lacks an explicit intended-untracked target")
-		return
-	}
-	request.Target.IntendedUntracked = append([]string{}, transaction.Snapshot.IntendedUntracked...)
-	request.Target.LedgerIDs = nil
-	if transactionPath != "" {
-		reviewsDir := filepath.Dir(transactionPath)
-		request.LedgerArtifact = ledgerPath
-		request.EvidenceArtifact = verifyPath
-		if request.FixDeltaArtifact != "" && filepath.Clean(request.FixDeltaArtifact) != filepath.Join(reviewsDir, "fix-delta.json") {
-			blockReviewGate(status, reviewtransaction.GateInvalidated, "gate request fix delta is outside the persisted SDD review artifacts")
+		var err error
+		receiptPayload, err = discoverNativeReceipt(context.Background(), repo)
+		if err != nil {
+			blockReviewGate(status, reviewtransaction.GateInvalidated, err.Error())
 			return
 		}
 	}
-	store, err := reviewtransaction.AuthoritativeStore(context.Background(), repo, receipt.LineageID)
-	if err != nil {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, fmt.Sprintf("authoritative repository review store cannot be derived: %v", err))
-		return
+	var evaluation reviewtransaction.NativeGateEvaluation
+	if reviewtransaction.CompactReceiptSchemaOf(receiptPayload) == reviewtransaction.CompactReceiptSchema {
+		receipt, err := reviewtransaction.ParseCompactReceipt(receiptPayload)
+		if err != nil {
+			blockReviewGate(status, reviewtransaction.GateInvalidated, fmt.Sprintf("compact review receipt is invalid or non-terminal: %v", err))
+			return
+		}
+		evaluation = reviewtransaction.EvaluateCompactGate(context.Background(), repo, receipt, reviewtransaction.NativeGateRequestInput{
+			Gate: reviewtransaction.GatePostApply, LineageID: receipt.LineageID,
+		})
+	} else {
+		receipt, err := reviewtransaction.ParseReceipt(receiptPayload)
+		if err != nil {
+			blockReviewGate(status, reviewtransaction.GateInvalidated, fmt.Sprintf("review receipt is invalid or non-terminal: %v", err))
+			return
+		}
+		request, err := reviewtransaction.BuildNativeGateRequest(context.Background(), repo, reviewtransaction.NativeGateRequestInput{
+			Gate: reviewtransaction.GatePostApply, LineageID: receipt.LineageID,
+		})
+		if err != nil {
+			blockReviewGate(status, reviewtransaction.GateInvalidated, fmt.Sprintf("native review gate request cannot be derived: %v", err))
+			return
+		}
+		evaluation = evaluateNativeReviewGate(context.Background(), repo, receipt, request)
 	}
-	chain, err := store.LoadChain()
-	if err != nil || chain.HeadRevision != request.StoreRevision || !reflect.DeepEqual(chain.Records[len(chain.Records)-1].Transaction, transaction) {
-		blockReviewGate(status, reviewtransaction.GateInvalidated, "persisted transaction is stale or does not match the authoritative CAS revision")
-		return
-	}
-	evaluation := reviewtransaction.EvaluateNativeGate(context.Background(), repo, receipt, request)
 	result := evaluation.Result
 	switch result {
 	case reviewtransaction.GateAllow:
-		status.ReviewGate = &ReviewGateState{Result: result, Reason: "approved receipt exactly matches authoritative transaction, current repository, policy, ledger, fix delta, and verify evidence"}
+		status.ReviewGate = &ReviewGateState{Result: result, Reason: "approved receipt exactly matches authoritative native state and the current repository"}
 	case reviewtransaction.GateScopeChanged:
 		blockReviewGate(status, result, "review scope changed; maintainer must create an explicit new lineage without reusing this budget")
 	case reviewtransaction.GateEscalated:
@@ -245,6 +173,63 @@ func applyReviewGate(
 	default:
 		blockReviewGate(status, reviewtransaction.GateInvalidated, "review receipt was invalidated by content relationship, policy, ledger, evidence, or publication state; explicit maintainer action is required and no budget resets")
 	}
+}
+
+var evaluateNativeReviewGate = reviewtransaction.EvaluateNativeGate
+
+func discoverNativeReceipt(ctx context.Context, repo string) ([]byte, error) {
+	var matches [][]byte
+	compactStores, err := reviewtransaction.DiscoverCompactStores(ctx, repo)
+	if err != nil {
+		return nil, fmt.Errorf("discover compact review stores: %w", err)
+	}
+	for _, store := range compactStores {
+		record, err := store.Load()
+		if err != nil || record.State.State != reviewtransaction.StateApproved && record.State.State != reviewtransaction.StateEscalated {
+			continue
+		}
+		payload, err := os.ReadFile(store.ReceiptPath())
+		if err != nil {
+			continue
+		}
+		receipt, err := reviewtransaction.ParseCompactReceipt(payload)
+		authoritative, receiptErr := record.State.Receipt()
+		if err != nil || receiptErr != nil || !reflect.DeepEqual(receipt, authoritative) {
+			continue
+		}
+		matches = append(matches, payload)
+	}
+	stores, err := reviewtransaction.DiscoverAuthoritativeStores(ctx, repo)
+	if err != nil {
+		return nil, fmt.Errorf("discover authoritative review stores: %w", err)
+	}
+	for _, store := range stores {
+		chain, err := store.LoadChain()
+		if err != nil {
+			continue
+		}
+		transaction := chain.Records[len(chain.Records)-1].Transaction
+		if transaction.State != reviewtransaction.StateApproved && transaction.State != reviewtransaction.StateEscalated {
+			continue
+		}
+		payload, err := os.ReadFile(filepath.Join(store.Dir, "artifacts", "receipt.json"))
+		if err != nil {
+			continue
+		}
+		receipt, err := reviewtransaction.ParseReceipt(payload)
+		authoritative, receiptErr := transaction.Receipt()
+		if err != nil || receiptErr != nil || !reflect.DeepEqual(receipt, authoritative) {
+			continue
+		}
+		matches = append(matches, payload)
+	}
+	if len(matches) == 0 {
+		return nil, errors.New("terminal review receipt is missing")
+	}
+	if len(matches) != 1 {
+		return nil, errors.New("multiple terminal native review receipts found; restore the change-local reviews/receipt.json mirror or remove stale terminal authority")
+	}
+	return matches[0], nil
 }
 
 func readReviewArtifact(path, content string) ([]byte, bool) {

@@ -37,7 +37,7 @@ If all gates pass, launch the hidden `sdd-apply` sub-agent with:
 Return a structured orchestration result with: status, executive_summary, artifacts, next_recommended, risks, and skill_resolution.
 
 POST-APPLY REVIEW ROUTING:
-After apply returns, rerun native status. If `nextRecommended: review`, the parent orchestrator builds the explicit intended-untracked manifest and runs `gentle-ai review-start ... --cwd <repo> --lineage <id>`. The repository Git common directory plus canonical lineage ID determines the authoritative CAS store. The apply executor never launches review.
+After apply returns, rerun native status. If `nextRecommended: review`, the parent orchestrator runs `gentle-ai review start --cwd <repo>`. The facade derives repository scope, lineage, tier, lenses, and correction budget from live Git. The apply executor never launches review.
 
 {{GENTLE_AI_AUTHORITY_FIRST_TERMINAL_PROCEDURE}}
 

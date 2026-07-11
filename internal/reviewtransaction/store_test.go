@@ -11,9 +11,54 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestWriteAtomicPropagatesParentDirectorySyncFailure(t *testing.T) {
+	originalGOOS := reviewRuntimeGOOS
+	originalSync := syncReviewDirectory
+	reviewRuntimeGOOS = func() string { return "linux" }
+	syncReviewDirectory = func(string) error { return errors.New("disk sync failed") }
+	t.Cleanup(func() {
+		reviewRuntimeGOOS = originalGOOS
+		syncReviewDirectory = originalSync
+	})
+
+	err := writeAtomic(filepath.Join(t.TempDir(), "state.json"), []byte("{}\n"), 0o644)
+	if err == nil || !strings.Contains(err.Error(), "sync parent directory") {
+		t.Fatalf("writeAtomic() error = %v, want parent-directory sync failure", err)
+	}
+}
+
+func TestWriteAtomicToleratesUnsupportedParentDirectorySync(t *testing.T) {
+	tests := []struct {
+		name string
+		goos string
+		err  error
+	}{
+		{name: "unix invalid operation", goos: "darwin", err: syscall.EINVAL},
+		{name: "unsupported filesystem", goos: "linux", err: errors.ErrUnsupported},
+		{name: "windows permission", goos: "windows", err: os.ErrPermission},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalGOOS := reviewRuntimeGOOS
+			originalSync := syncReviewDirectory
+			reviewRuntimeGOOS = func() string { return tt.goos }
+			syncReviewDirectory = func(string) error { return tt.err }
+			t.Cleanup(func() {
+				reviewRuntimeGOOS = originalGOOS
+				syncReviewDirectory = originalSync
+			})
+
+			if err := writeAtomic(filepath.Join(t.TempDir(), "state.json"), []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("writeAtomic() unsupported directory sync error = %v", err)
+			}
+		})
+	}
+}
 
 func TestStoreIsAppendOnlyAtomicAndRejectsStaleWriters(t *testing.T) {
 	store := Store{Dir: filepath.Join(t.TempDir(), "review-store")}
@@ -235,7 +280,7 @@ func TestStoreRejectsCounterAndOutcomeRegression(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-001", Class: EvidenceDeterministic, Proof: "failing focused test"}})
+	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-001", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "failing focused test"}})
 	third, err := store.Append(second, Record{Operation: "review/classify", Transaction: *tx})
 	if err != nil {
 		t.Fatal(err)
@@ -248,6 +293,244 @@ func TestStoreRejectsCounterAndOutcomeRegression(t *testing.T) {
 	if _, err := store.Append(third, Record{Operation: "retry/regress", Transaction: regressive}); !errors.Is(err, ErrInvalidSuccessor) {
 		t.Fatalf("Append(regressive outcome) error = %v, want ErrInvalidSuccessor", err)
 	}
+}
+
+func TestStoreLoadsLegacyClassificationAndAppendsItsLegalSuccessor(t *testing.T) {
+	store := Store{Dir: filepath.Join(t.TempDir(), "review-store")}
+	tx := newTestTransaction(t, ModeOrdinary4R)
+	_ = tx.StartReview()
+	genesis := writeStoreEvent(t, store, Record{Operation: "review/start", Transaction: *tx})
+	_ = freezeTestFindings(tx, []Finding{{ID: "R1-001", Severity: "CRITICAL"}})
+	frozen := writeStoreEvent(t, store, Record{Operation: "review/freeze-findings", PreviousRevision: genesis, Transaction: *tx})
+	_, _ = tx.ClassifyEvidence([]FindingEvidence{{
+		FindingID: "R1-001", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "legacy concrete proof",
+	}})
+	legacyClassification := tx.Classifications["R1-001"]
+	legacyClassification.Causality = ""
+	tx.Classifications["R1-001"] = legacyClassification
+	classified := writeStoreEvent(t, store, Record{Operation: "review/classify-evidence", PreviousRevision: frozen, Transaction: *tx})
+
+	loaded, revision, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load(legacy classification) error = %v", err)
+	}
+	if revision != classified || !loaded.Transaction.legacyCausality {
+		t.Fatalf("legacy classification load = revision %q transaction %#v", revision, loaded.Transaction)
+	}
+	if err := loaded.Transaction.BeginFix(hash("2")); err != nil {
+		t.Fatalf("BeginFix(legacy successor) error = %v", err)
+	}
+	if _, err := store.Append(revision, Record{Operation: "review/begin-fix", Transaction: loaded.Transaction}); err != nil {
+		t.Fatalf("Append(legacy successor) error = %v", err)
+	}
+	chain, err := store.LoadChain()
+	if err != nil {
+		t.Fatalf("LoadChain(legacy successor) error = %v", err)
+	}
+	if got := chain.Records[len(chain.Records)-1].Transaction; got.State != StateFixing || !got.legacyCausality {
+		t.Fatalf("legacy successor replay = %#v", got)
+	}
+}
+
+func TestStoreLoadsLegacyBoundedLineageAndCompletesFixWithoutNewBudgetSemantics(t *testing.T) {
+	store := Store{Dir: filepath.Join(t.TempDir(), "review-store")}
+	originalChangedLines := 196
+	tx, err := NewTransaction(Start{
+		LineageID: "legacy-bounded", Mode: ModeOrdinaryBounded, Generation: 1,
+		Snapshot: newTestTransaction(t, ModeOrdinary4R).Snapshot, PolicyHash: hash("d"),
+		RiskLevel: RiskMedium, SelectedLenses: []string{LensReliability}, OriginalChangedLines: &originalChangedLines,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.StartReview(); err != nil {
+		t.Fatal(err)
+	}
+	legacy := withoutCorrectionBudgetFields(t, *tx)
+	revision := writeStoreEvent(t, store, Record{Operation: "review/start", Transaction: legacy})
+	finding := Finding{ID: "REL-001", Lens: "reliability", Location: "internal/example.go:1", Severity: "CRITICAL", Claim: "legacy regression", ProofRefs: []string{"legacy test failed"}}
+	if err := legacy.RecordLensResult(LensResult{Lens: LensReliability, Findings: []Finding{finding}, Evidence: []string{"legacy focused test exited 1"}}); err != nil {
+		t.Fatal(err)
+	}
+	revision = writeStoreEvent(t, store, Record{Operation: "review/record-lens-result", PreviousRevision: revision, Transaction: legacy})
+	if err := freezeTestFindings(&legacy, []Finding{finding}); err != nil {
+		t.Fatal(err)
+	}
+	revision = writeStoreEvent(t, store, Record{Operation: "review/freeze-findings", PreviousRevision: revision, Transaction: legacy})
+	if _, err := legacy.ClassifyEvidence([]FindingEvidence{{FindingID: finding.ID, Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "legacy changed hunk"}}); err != nil {
+		t.Fatal(err)
+	}
+	revision = writeStoreEvent(t, store, Record{Operation: "review/classify-evidence", PreviousRevision: revision, Transaction: legacy})
+
+	loaded, loadedRevision, err := store.Load()
+	if err != nil || loadedRevision != revision || !loaded.Transaction.legacyCorrectionBudget {
+		t.Fatalf("Load(legacy bounded) = revision %q transaction %#v err %v", loadedRevision, loaded.Transaction, err)
+	}
+	if err := loaded.Transaction.BeginFix(hash("2")); err != nil {
+		t.Fatalf("BeginFix(legacy bounded) error = %v", err)
+	}
+	revision, err = store.Append(revision, Record{Operation: "review/begin-fix", Transaction: loaded.Transaction})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fix := loaded.Transaction.Snapshot
+	fix.Kind, fix.BaseTree, fix.CandidateTree = TargetFixDiff, loaded.Transaction.FinalCandidateTree, tree("c")
+	fix.LedgerIDs, fix.Identity = []string{finding.ID}, hash("3")
+	if err := loaded.Transaction.CompleteFix(fix, hash("4"), fix.LedgerIDs); err != nil {
+		t.Fatalf("CompleteFix(legacy bounded) error = %v", err)
+	}
+	if _, err := store.Append(revision, Record{Operation: "review/complete-fix", Transaction: loaded.Transaction}); err != nil {
+		t.Fatalf("Append(legacy bounded fix) error = %v", err)
+	}
+}
+
+func TestStoreRejectsFreshLegacyShapedBoundedGenesis(t *testing.T) {
+	store := Store{Dir: filepath.Join(t.TempDir(), "review-store")}
+	tx, err := NewTransaction(boundedStart(t, []string{LensReliability}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.StartReview(); err != nil {
+		t.Fatal(err)
+	}
+	legacy := withoutCorrectionBudgetFields(t, *tx)
+	if _, err := store.Append("", Record{Operation: "review/start", Transaction: legacy}); !errors.Is(err, ErrInvalidSuccessor) {
+		t.Fatalf("Append(fresh legacy-shaped bounded genesis) error = %v, want ErrInvalidSuccessor", err)
+	}
+	if _, _, err := store.Load(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected legacy-shaped genesis created authority: %v", err)
+	}
+}
+
+func TestSuccessorKeepsOriginalRiskInputsAndBudgetImmutable(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Transaction)
+	}{
+		{name: "risk tier", mutate: func(tx *Transaction) { tx.RiskLevel = RiskHigh }},
+		{name: "selected lenses", mutate: func(tx *Transaction) { tx.SelectedLenses = []string{LensRisk} }},
+		{name: "original changed lines", mutate: func(tx *Transaction) { value := 197; tx.OriginalChangedLines = &value }},
+		{name: "correction budget", mutate: func(tx *Transaction) { value := 97; tx.CorrectionBudget = &value }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			previous := budgetedAtFixRequired(t, 196)
+			next := *previous
+			if err := next.BeginFix(hash("2"), 98); err != nil {
+				t.Fatal(err)
+			}
+			tt.mutate(&next)
+			if err := validateSuccessor(*previous, next, "review/begin-fix"); !errors.Is(err, ErrInvalidSuccessor) {
+				t.Fatalf("validateSuccessor() error = %v, want ErrInvalidSuccessor", err)
+			}
+		})
+	}
+}
+
+func TestAuthoritativeStoreRejectsForgedRepositoryDerivedBudgetInputsAndActualLines(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	writeSnapshotFile(t, repo, "tracked.txt", "candidate one\ncandidate two\n")
+	snapshot, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), Target{Kind: TargetCurrentChanges, IntendedUntracked: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	risk, originalChangedLines, err := (SnapshotBuilder{Repo: repo}).ClassifySnapshotRisk(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := NewTransaction(Start{
+		LineageID: "repository-budget", Mode: ModeOrdinaryBounded, Generation: 1, Snapshot: snapshot,
+		PolicyHash: hash("d"), RiskLevel: risk, SelectedLenses: []string{LensReliability}, OriginalChangedLines: &originalChangedLines,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.StartReview(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := AuthoritativeStore(context.Background(), repo, tx.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := *tx
+	forgedOriginal := originalChangedLines + 2
+	forgedBudget, _ := CorrectionBudget(forgedOriginal)
+	forged.OriginalChangedLines, forged.CorrectionBudget = &forgedOriginal, &forgedBudget
+	if _, err := store.Append("", Record{Operation: "review/start", Transaction: forged}); !errors.Is(err, ErrInvalidSuccessor) {
+		t.Fatalf("Append(forged original count) error = %v, want ErrInvalidSuccessor", err)
+	}
+	revision, err := store.Append("", Record{Operation: "review/start", Transaction: *tx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding := Finding{ID: "REL-001", Lens: "reliability", Location: "tracked.txt:1", Severity: "CRITICAL", Claim: "candidate regression", ProofRefs: []string{"focused test failed"}}
+	if err := tx.RecordLensResult(LensResult{Lens: LensReliability, Findings: []Finding{finding}, Evidence: []string{"focused test exited 1"}}); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Append(revision, Record{Operation: "review/record-lens-result", Transaction: *tx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := freezeTestFindings(tx, []Finding{finding}); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Append(revision, Record{Operation: "review/freeze-findings", Transaction: *tx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: finding.ID, Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "changed hunk"}}); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Append(revision, Record{Operation: "review/classify-evidence", Transaction: *tx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.BeginFix(hash("2"), *tx.CorrectionBudget); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Append(revision, Record{Operation: "review/begin-fix", Transaction: *tx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshotFile(t, repo, "tracked.txt", "corrected one\ncandidate two\n")
+	fix, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), Target{Kind: TargetFixDiff, BaseRef: tx.FinalCandidateTree, IntendedUntracked: []string{}, LedgerIDs: []string{finding.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.CompleteFix(fix, hash("4"), fix.LedgerIDs, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(revision, Record{Operation: "review/complete-fix", Transaction: *tx}); !errors.Is(err, ErrInvalidSuccessor) {
+		t.Fatalf("Append(forged actual count) error = %v, want ErrInvalidSuccessor", err)
+	}
+	loaded, head, err := store.Load()
+	if err != nil || head != revision || loaded.Transaction.State != StateFixing {
+		t.Fatalf("rejected actual count mutated authority: head=%q transaction=%#v err=%v", head, loaded.Transaction, err)
+	}
+}
+
+func withoutCorrectionBudgetFields(t *testing.T, transaction Transaction) Transaction {
+	t.Helper()
+	payload, err := json.Marshal(transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"original_changed_lines", "correction_budget", "proposed_correction_lines", "actual_correction_lines"} {
+		delete(raw, field)
+	}
+	payload, err = json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := ParseTransaction(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return legacy
 }
 
 func TestValidateSuccessorEnforcesReleaseBindingTimingAndImmutability(t *testing.T) {
@@ -477,7 +760,7 @@ func TestStoreLoadRejectsHashValidSemanticFindingBypasses(t *testing.T) {
 				genesis := writeStoreEvent(t, store, Record{Operation: "review/start", Transaction: *tx})
 				_ = freezeTestFindings(tx, []Finding{{ID: "R1-001", Severity: "CRITICAL"}})
 				frozen := writeStoreEvent(t, store, Record{Operation: "review/freeze-findings", PreviousRevision: genesis, Transaction: *tx})
-				_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-001", Class: EvidenceInferential, Proof: "concurrency trace"}})
+				_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-001", Class: EvidenceInferential, Causality: CausalIntroduced, Proof: "concurrency trace"}})
 				classified := writeStoreEvent(t, store, Record{Operation: "review/classify", PreviousRevision: frozen, Transaction: *tx})
 				forged := *tx
 				forged.State = StateReadyFinalVerification

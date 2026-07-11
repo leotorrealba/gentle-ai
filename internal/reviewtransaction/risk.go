@@ -1,12 +1,16 @@
 package reviewtransaction
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
 const LargeChangeLines = 400
+const MaxCorrectionChangedLines = 200
 
 type RiskLevel string
 
@@ -69,9 +73,9 @@ func ClassifyRisk(input RiskInput) (RiskLevel, error) {
 
 // CountChangedLines is the cross-adapter counting contract. Callers provide the
 // canonical base-to-candidate union with one entry per repository-relative path.
-// Text additions and deletions count once, including generated text and complete
-// untracked/deleted text. Binary, mode-only, and unchanged rename entries count
-// as zero. Generated files remain part of the snapshot and are never discounted.
+// Authored text additions and deletions count once, including complete
+// untracked/deleted text. Recognized generated goldens, binary, mode-only, and
+// unchanged rename entries count as zero while remaining in snapshot identity.
 func CountChangedLines(stats []DiffStat) (int, error) {
 	total := 0
 	seen := make(map[string]struct{}, len(stats))
@@ -87,12 +91,81 @@ func CountChangedLines(stats []DiffStat) (int, error) {
 		if stat.Additions < 0 || stat.Deletions < 0 {
 			return 0, fmt.Errorf("negative diff stat for %q", logicalPath)
 		}
-		if stat.Binary || stat.ModeOnly {
+		if isGeneratedGoldenPath(logicalPath) || stat.Binary || stat.ModeOnly {
 			continue
 		}
 		total += stat.Additions + stat.Deletions
 	}
 	return total, nil
+}
+
+// CorrectionBudget freezes the maximum correction size from the original
+// authored candidate. Odd line counts round up and the budget is capped at 200.
+func CorrectionBudget(originalChangedLines int) (int, error) {
+	if originalChangedLines < 0 {
+		return 0, errors.New("original changed lines cannot be negative")
+	}
+	return min(MaxCorrectionChangedLines, originalChangedLines/2+originalChangedLines%2), nil
+}
+
+// ClassifySnapshotRisk derives both risk and changed lines from one immutable
+// repository tree boundary and the canonical CountChangedLines contract.
+func (builder SnapshotBuilder) ClassifySnapshotRisk(ctx context.Context, snapshot Snapshot) (RiskLevel, int, error) {
+	stats, err := builder.DiffStats(ctx, snapshot)
+	if err != nil {
+		return "", 0, err
+	}
+	changedLines, err := CountChangedLines(stats)
+	if err != nil {
+		return "", 0, err
+	}
+	onlyNonExecutable := true
+	touchesConfiguration := false
+	for _, stat := range stats {
+		if isGeneratedGoldenPath(stat.Path) {
+			continue
+		}
+		onlyNonExecutable = onlyNonExecutable && isNonExecutableReviewPath(stat.Path)
+		touchesConfiguration = touchesConfiguration || isConfigurationReviewPath(stat.Path)
+	}
+	risk, err := ClassifyRisk(RiskInput{
+		Stats: stats, OnlyNonExecutableChanges: onlyNonExecutable, TouchesConfiguration: touchesConfiguration,
+	})
+	return risk, changedLines, err
+}
+
+func (builder SnapshotBuilder) ChangedLines(ctx context.Context, snapshot Snapshot) (int, error) {
+	stats, err := builder.DiffStats(ctx, snapshot)
+	if err != nil {
+		return 0, err
+	}
+	return CountChangedLines(stats)
+}
+
+func isNonExecutableReviewPath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".mdx", ".rst", ".adoc", ".png", ".jpg", ".jpeg", ".gif", ".svg":
+		return true
+	default:
+		return false
+	}
+}
+
+func isConfigurationReviewPath(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return true
+	}
+	switch base {
+	case "go.mod", "go.sum", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "dockerfile", "makefile":
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json", ".yaml", ".yml", ".toml", ".ini", ".env":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasHighSignal(signals []RiskSignal) bool {
@@ -111,6 +184,9 @@ func validRiskSignal(signal RiskSignal) bool {
 
 func touchesHotPath(stats []DiffStat) bool {
 	for _, stat := range stats {
+		if isGeneratedGoldenPath(stat.Path) {
+			continue
+		}
 		lower := strings.ToLower(stat.Path)
 		for _, token := range strings.FieldsFunc(lower, func(r rune) bool {
 			return r == '/' || r == '\\' || r == '.' || r == '-' || r == '_'

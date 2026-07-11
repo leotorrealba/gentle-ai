@@ -11,37 +11,22 @@ import (
 )
 
 var boundedReviewRequiredClauses = []string{
-	"Review is explicit `review/start(target)`",
-	"detached, read-only, and terminal after one result",
-	"Findings freeze after the initial selected-lens review",
-	"canonical empty ledger bytes are exactly `{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}`",
+	"Parent orchestrator and native CLI only",
+	"gentle-ai review start",
+	"gentle-ai review finalize --result <file>",
+	"Native Go assigns missing lens/IDs",
+	"Only `introduced`, `behavior-activated`, or `worsened`",
+	"Route `pre-existing` and `base-only` to follow-ups; `unknown` escalates",
+	"one correction transaction",
+	"positive `--correction-lines` forecast before editing",
+	"one read-only scoped fix validator",
+	"one independent requirements/runtime verification",
 	"### Authority-First Terminal Procedure",
-	"Hashes cannot reconstruct policy, ledger, or verification-evidence bytes",
-	"No mirror mutation may precede its confirmed authority boundary",
-	"recover with `review-resume`, never `review-start` or a new budget",
-	"existing malformed lineage remains invalid and requires an explicit replacement lineage",
-	"in-memory orchestration claim with neutral evidence",
-	"MUST NOT serialize `evidence_class` or `status` into the strict native ledger",
-	"Deterministic severe findings become `corroborated` with proof and never invoke a refuter",
-	"exactly ONE detached refuter operation for the transaction",
-	"Insufficient findings become `inconclusive` and are never auto-fixed",
-	"one correction transaction composed of atomic work units",
-	"immutable genesis path set",
-	"maps exactly to frozen accepted/blocking IDs",
-	"exactly one scoped fix-delta validator",
-	"original acceptance criteria/tests and correction regression evidence",
-	"Later observations are non-blocking follow-ups",
-	"can return only `approve` or `escalate`",
-	"Final verification is independent requirements/runtime verification",
-	"Judgment Day replaces ordinary 4R",
-	"Only the parent orchestrator may launch a correction actor or scoped validator",
-	"openspec/changes/{change-name}/reviews/transaction.json",
-	"sdd/{change-name}/review/transaction",
-	"gentle-ai review-validate --cwd <repo> --lineage <id> --gate",
-	"never hand-author request JSON",
-	"base_advanced_compatible",
-	"Ed25519",
-	"Model, provider, profile, and effort selection remain optional user choices",
+	"rerun the same facade operation",
+	"Repository Git common-dir CAS remains authoritative",
+	"Existing transaction, policy, ledger, receipt, bundle, and gate-context schemas",
+	"gentle-ai review validate --gate <gate>",
+	"Model/provider/profile selection remains user-owned",
 }
 
 func TestBoundedReviewContractRendersForEverySupportedAgent(t *testing.T) {
@@ -53,6 +38,11 @@ func TestBoundedReviewContractRendersForEverySupportedAgent(t *testing.T) {
 		t.Run(string(agent.ID), func(t *testing.T) {
 			content := renderSDDOrchestratorAsset(agent.ID)
 			assertTextContainsClauses(t, string(agent.ID), content, boundedReviewRequiredClauses)
+			for _, forbidden := range []string{"review-start", "review-step", "review-resume", "review-validate", "review-bundle-export", "review-bundle-import"} {
+				if strings.Contains(content, forbidden) {
+					t.Errorf("rendered %s exposes lower-level compatibility command %q", agent.ID, forbidden)
+				}
+			}
 			for _, forbidden := range []string{
 				"exactly THREE refuters total",
 				"3 total for full-4R",
@@ -67,6 +57,11 @@ func TestBoundedReviewContractRendersForEverySupportedAgent(t *testing.T) {
 			}
 		})
 	}
+	for _, forbidden := range []string{"review-start", "review-step", "review-resume", "review-validate", "review-bundle-export", "review-bundle-import"} {
+		if strings.Contains(boundedReviewContract(), forbidden) {
+			t.Errorf("orchestrator contract exposes lower-level compatibility command %q", forbidden)
+		}
+	}
 	if got := sddOrchestratorAsset(model.AgentPi); got != "generic/sdd-orchestrator.md" {
 		t.Fatalf("Pi orchestrator asset = %q, want generic adapter", got)
 	}
@@ -78,7 +73,7 @@ func TestRenderedReviewersAreReadOnlyAndSingleResult(t *testing.T) {
 			path := family + "/agents/review-" + lens + ".md"
 			t.Run(family+"/"+lens, func(t *testing.T) {
 				content := renderBoundedReviewAsset(path)
-				for _, want := range []string{"read-only reviewer", "Return one result and terminate", "in-memory orchestration claim with neutral evidence"} {
+				for _, want := range []string{"read-only reviewer", "immutable candidate diff once", "## Candidate-Causal Admission", "Return one JSON object and no prose"} {
 					if !strings.Contains(content, want) {
 						t.Errorf("%s missing %q", path, want)
 					}
@@ -100,10 +95,8 @@ func TestBoundedReviewContractDoesNotEnforceModelPolicy(t *testing.T) {
 func TestAuthorityFirstTerminalProcedureIsStructuredAndMirrorEligibilityIsClosed(t *testing.T) {
 	rows := parseAuthorityFirstRows(t, authorityFirstTerminalProcedure())
 	wantOperations := []string{
-		"preserve-preimages", "review-start", "record-lens-result", "freeze-findings", "classify-evidence",
-		"review-resume-preterminal", "begin-final-verification", "independent-final-verification", "complete-final-verification",
-		"review-resume-terminal", "review-bundle-export", "extract-terminal-receipt", "construct-gate-request",
-		"review-validate", "reconcile-terminal-mirrors",
+		"gentle-ai review start", "gentle-ai review finalize",
+		"gentle-ai review validate --gate <gate> --cwd <repo>", "reconcile-terminal-mirrors",
 	}
 	if len(rows) != len(wantOperations) {
 		t.Fatalf("authority-first rows = %d, want %d", len(rows), len(wantOperations))

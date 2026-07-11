@@ -3,36 +3,38 @@ package sdd
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gentleman-programming/gentle-ai/internal/assets"
 )
 
 var requiredLedgerClauses = boundedReviewRequiredClauses
 
-const requiredOrchestratorMergeModeClause = "Only the parent orchestrator may launch a correction actor or scoped validator"
+const requiredOrchestratorMergeModeClause = "Parent orchestrator and native CLI only"
 
-func TestBoundedReviewContractDistinguishesClaimsFromStrictNativeLedger(t *testing.T) {
+func TestBoundedReviewContractLeavesCanonicalizationToNativeGo(t *testing.T) {
 	content := boundedReviewContract()
 	for _, want := range []string{
-		"`id` | `{LENS}-{NNN}`",
-		"`evidence_class` | `deterministic | inferential | insufficient`",
-		"`proof_refs` | Concrete command, output hash, or `file:line` references",
-		"`status` | `open | corroborated | refuted | inconclusive | fixed | verified | info`",
-		"exact native `Finding` fields `id`, `lens`, `location`, `severity`, `claim`, and `proof_refs`",
-		"MUST NOT serialize `evidence_class` or `status` into the strict native ledger",
-		"Unknown native finding fields remain rejected",
-		"`approved | escalated`",
-		"`scope-changed | invalidated`",
+		"Native Go assigns missing lens/IDs",
+		"models never construct canonical bytes or hashes",
+		"Freeze merged findings",
 	} {
 		if !strings.Contains(content, want) {
-			t.Errorf("canonical bounded review contract missing %q", want)
+			t.Errorf("orchestrator contract missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"canonical empty ledger bytes are exactly", "MUST NOT serialize", "Unknown native finding fields remain rejected"} {
+		if strings.Contains(content, forbidden) {
+			t.Errorf("orchestrator contract retains model-facing canonicalization rule %q", forbidden)
 		}
 	}
 }
 
-func TestDedicatedReviewAndJudgmentAssetsRenderCanonicalContract(t *testing.T) {
+func TestDedicatedReviewAndJudgmentAssetsRenderRoleContracts(t *testing.T) {
 	assetsByFamily := map[string][]string{
 		"claude": {
 			"claude/agents/review-risk.md", "claude/agents/review-readability.md",
@@ -57,7 +59,8 @@ func TestDedicatedReviewAndJudgmentAssetsRenderCanonicalContract(t *testing.T) {
 		for _, path := range paths {
 			t.Run(family+"/"+path, func(t *testing.T) {
 				content := renderBoundedReviewAsset(path)
-				assertTextContainsClauses(t, path, content, boundedReviewRequiredClauses)
+				assertTextContainsClauses(t, path, content, []string{"read-only", "candidate", "BLOCKER", "CRITICAL", "causal", "proof"})
+				assertNoReviewerLifecycleInstructions(t, path, content)
 			})
 		}
 	}
@@ -95,6 +98,12 @@ func TestDedicatedReviewersAndRefutersAreStructurallyReadOnly(t *testing.T) {
 		}
 	}
 	for _, path := range []string{
+		"claude/agents/review-refuter.md", "cursor/agents/review-refuter.md",
+		"kimi/agents/review-refuter.md", "kiro/agents/review-refuter.md",
+	} {
+		assertNoReviewerLifecycleInstructions(t, path, renderBoundedReviewAsset(path))
+	}
+	for _, path := range []string{
 		"kimi/agents/review-risk.yaml", "kimi/agents/review-readability.yaml",
 		"kimi/agents/review-reliability.yaml", "kimi/agents/review-resilience.yaml",
 		"kimi/agents/review-refuter.yaml",
@@ -120,16 +129,81 @@ func TestOpenCodeOverlaysRenderBoundedReadOnlyReviewRoles(t *testing.T) {
 			for _, name := range []string{"review-risk", "review-readability", "review-reliability", "review-resilience"} {
 				agent := agentsMap[name].(map[string]any)
 				prompt := agent["prompt"].(string)
-				assertTextContainsClauses(t, path+" "+name, prompt, boundedReviewRequiredClauses)
+				assertTextContainsClauses(t, path+" "+name, prompt, []string{"## Scope", "## Candidate-Causal Admission", "## Severity", "## Evidence", "## Output"})
+				assertNoReviewerLifecycleInstructions(t, path+" "+name, prompt)
+				assertOpenCodeReadOnlyTools(t, path+" "+name, agent["tools"].(map[string]any))
+			}
+			for _, name := range []string{"jd-judge-a", "jd-judge-b"} {
+				agent := agentsMap[name].(map[string]any)
+				prompt := agent["prompt"].(string)
+				if prompt != judgmentDayReviewerContract() {
+					t.Errorf("%s %s does not use the native role-only judgment contract", path, name)
+				}
+				assertNoReviewerLifecycleInstructions(t, path+" "+name, prompt)
 				assertOpenCodeReadOnlyTools(t, path+" "+name, agent["tools"].(map[string]any))
 			}
 			refuter := agentsMap[reviewRefuterAgentName].(map[string]any)
-			if prompt := refuter["prompt"].(string); !strings.Contains(prompt, "exactly ONE transaction-wide inferential batch") || !strings.Contains(prompt, "terminate") {
-				t.Errorf("%s refuter prompt is not bounded: %s", path, prompt)
+			refuterPrompt := refuter["prompt"].(string)
+			if !strings.Contains(refuterPrompt, "exactly ONE transaction-wide inferential batch") || !strings.Contains(refuterPrompt, "terminate") {
+				t.Errorf("%s refuter prompt is not bounded: %s", path, refuterPrompt)
 			}
+			assertNoReviewerLifecycleInstructions(t, path+" refuter", refuterPrompt)
 			assertOpenCodeReadOnlyTools(t, path+" refuter", refuter["tools"].(map[string]any))
 		})
 	}
+}
+
+func TestOpenCodeRenderedReviewProtocolCost(t *testing.T) {
+	home := t.TempDir()
+	if _, err := Inject(home, opencodeAdapter(), ""); err != nil {
+		t.Fatalf("Inject(opencode) error = %v", err)
+	}
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	payload, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings struct {
+		Agent map[string]struct {
+			Prompt string `json:"prompt"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(payload, &settings); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name          string
+		agents        []string
+		beforeChars   int
+		wantChars     int
+		maxCharacters int
+	}{
+		{name: "standard", agents: []string{"review-reliability"}, beforeChars: 42_301, wantChars: 5_772, maxCharacters: 6_000},
+		{name: "full-4R", agents: []string{"review-risk", "review-resilience", "review-readability", "review-reliability"}, beforeChars: 106_998, wantChars: 11_772, maxCharacters: 16_000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chars, _ := measurePromptCost(boundedReviewContract())
+			for _, agent := range tt.agents {
+				promptChars, _ := measurePromptCost(settings.Agent[agent].Prompt)
+				chars += promptChars
+			}
+			tokens := chars / 4
+			t.Logf("before=%d characters/%d estimated tokens after=%d/%d", tt.beforeChars, tt.beforeChars/4, chars, tokens)
+			if chars != tt.wantChars {
+				t.Fatalf("rendered protocol cost = %d characters / %d estimated tokens, want deterministic total %d / %d", chars, tokens, tt.wantChars, tt.wantChars/4)
+			}
+			if chars > tt.maxCharacters {
+				t.Fatalf("rendered protocol cost = %d characters / %d estimated tokens, target <= %d / %d", chars, tokens, tt.maxCharacters, tt.maxCharacters/4)
+			}
+		})
+	}
+}
+
+func measurePromptCost(prompt string) (characters, estimatedTokens int) {
+	characters = utf8.RuneCountInString(prompt)
+	return characters, characters / 4
 }
 
 func markdownFrontmatter(t *testing.T, path string) string {
@@ -159,6 +233,20 @@ func assertTextContainsClauses(t *testing.T, label, content string, clauses []st
 	for _, clause := range clauses {
 		if !strings.Contains(content, clause) {
 			t.Errorf("%s missing required clause %q", label, clause)
+		}
+	}
+}
+
+func assertNoReviewerLifecycleInstructions(t *testing.T, label, content string) {
+	t.Helper()
+	forbidden := regexp.MustCompile(`(?i)\b(bundle|receipt|mirror|release|gate)s?\b`)
+	if match := forbidden.FindString(content); match != "" {
+		t.Errorf("%s reviewer prompt contains lifecycle instruction term %q", label, match)
+	}
+	lower := strings.ToLower(content)
+	for _, phrase := range []string{"ordinary 4r", "fix/re-judgment", "launches review-refuter", "review/start", "review-resume", "correction transaction", "scoped validator"} {
+		if strings.Contains(lower, phrase) {
+			t.Errorf("%s reviewer prompt contains lifecycle routing phrase %q", label, phrase)
 		}
 	}
 }

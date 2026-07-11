@@ -56,6 +56,17 @@ const (
 	EvidenceInsufficient  EvidenceClass = "insufficient"
 )
 
+type CausalDisposition string
+
+const (
+	CausalIntroduced        CausalDisposition = "introduced"
+	CausalBehaviorActivated CausalDisposition = "behavior-activated"
+	CausalWorsened          CausalDisposition = "worsened"
+	CausalPreExisting       CausalDisposition = "pre-existing"
+	CausalBaseOnly          CausalDisposition = "base-only"
+	CausalUnknown           CausalDisposition = "unknown"
+)
+
 type EvidenceOutcome string
 
 const (
@@ -81,13 +92,14 @@ type Counters struct {
 }
 
 type Start struct {
-	LineageID      string
-	Mode           Mode
-	Generation     int
-	Snapshot       Snapshot
-	PolicyHash     string
-	RiskLevel      RiskLevel
-	SelectedLenses []string
+	LineageID            string
+	Mode                 Mode
+	Generation           int
+	Snapshot             Snapshot
+	PolicyHash           string
+	RiskLevel            RiskLevel
+	SelectedLenses       []string
+	OriginalChangedLines *int
 }
 
 type LensResult struct {
@@ -127,9 +139,10 @@ type FollowUp struct {
 }
 
 type FindingEvidence struct {
-	FindingID string        `json:"finding_id"`
-	Class     EvidenceClass `json:"class"`
-	Proof     string        `json:"proof"`
+	FindingID string            `json:"finding_id"`
+	Class     EvidenceClass     `json:"class"`
+	Causality CausalDisposition `json:"causal_disposition,omitempty"`
+	Proof     string            `json:"proof"`
 }
 
 type RefuterClaim struct {
@@ -158,40 +171,46 @@ type EvidenceResult struct {
 }
 
 type Transaction struct {
-	Schema                 string                     `json:"schema"`
-	LineageID              string                     `json:"lineage_id"`
-	Mode                   Mode                       `json:"mode"`
-	Generation             int                        `json:"generation"`
-	State                  State                      `json:"state"`
-	Snapshot               Snapshot                   `json:"snapshot"`
-	GenesisPaths           []string                   `json:"genesis_paths,omitempty"`
-	BaseTree               string                     `json:"base_tree"`
-	PathsDigest            string                     `json:"paths_digest"`
-	InitialReviewTree      string                     `json:"initial_review_tree"`
-	FinalCandidateTree     string                     `json:"final_candidate_tree"`
-	FixDeltaHash           string                     `json:"fix_delta_hash"`
-	PolicyHash             string                     `json:"policy_hash"`
-	LedgerHash             string                     `json:"ledger_hash"`
-	LedgerFindingsHash     string                     `json:"ledger_findings_hash"`
-	EvidenceHash           string                     `json:"evidence_hash"`
-	JudgeProofHash         string                     `json:"judge_proof_hash,omitempty"`
-	JudgeAgreementHash     string                     `json:"judge_agreement_hash,omitempty"`
-	JudgeProofs            []JudgeProof               `json:"judge_proofs"`
-	Release                *ReleaseEvidence           `json:"release,omitempty"`
-	FailedEvidenceRevision string                     `json:"failed_evidence_revision,omitempty"`
-	Counters               Counters                   `json:"counters"`
-	Findings               []Finding                  `json:"findings"`
-	Classifications        map[string]FindingEvidence `json:"classifications"`
-	Outcomes               map[string]EvidenceOutcome `json:"outcomes"`
-	FixFindingIDs          []string                   `json:"fix_finding_ids"`
-	PendingRefuterIDs      []string                   `json:"pending_refuter_ids"`
-	FixCausedFindings      []Finding                  `json:"fix_caused_findings"`
-	FollowUps              []FollowUp                 `json:"follow_ups"`
-	OriginalCriteria       *ValidationCheck           `json:"original_criteria,omitempty"`
-	CorrectionRegression   *ValidationCheck           `json:"correction_regression,omitempty"`
-	RiskLevel              RiskLevel                  `json:"risk_level,omitempty"`
-	SelectedLenses         []string                   `json:"selected_lenses,omitempty"`
-	LensResults            []LensResult               `json:"lens_results,omitempty"`
+	Schema                  string                     `json:"schema"`
+	LineageID               string                     `json:"lineage_id"`
+	Mode                    Mode                       `json:"mode"`
+	Generation              int                        `json:"generation"`
+	State                   State                      `json:"state"`
+	Snapshot                Snapshot                   `json:"snapshot"`
+	GenesisPaths            []string                   `json:"genesis_paths,omitempty"`
+	BaseTree                string                     `json:"base_tree"`
+	PathsDigest             string                     `json:"paths_digest"`
+	InitialReviewTree       string                     `json:"initial_review_tree"`
+	FinalCandidateTree      string                     `json:"final_candidate_tree"`
+	FixDeltaHash            string                     `json:"fix_delta_hash"`
+	PolicyHash              string                     `json:"policy_hash"`
+	LedgerHash              string                     `json:"ledger_hash"`
+	LedgerFindingsHash      string                     `json:"ledger_findings_hash"`
+	EvidenceHash            string                     `json:"evidence_hash"`
+	JudgeProofHash          string                     `json:"judge_proof_hash,omitempty"`
+	JudgeAgreementHash      string                     `json:"judge_agreement_hash,omitempty"`
+	JudgeProofs             []JudgeProof               `json:"judge_proofs"`
+	Release                 *ReleaseEvidence           `json:"release,omitempty"`
+	FailedEvidenceRevision  string                     `json:"failed_evidence_revision,omitempty"`
+	Counters                Counters                   `json:"counters"`
+	Findings                []Finding                  `json:"findings"`
+	Classifications         map[string]FindingEvidence `json:"classifications"`
+	Outcomes                map[string]EvidenceOutcome `json:"outcomes"`
+	FixFindingIDs           []string                   `json:"fix_finding_ids"`
+	PendingRefuterIDs       []string                   `json:"pending_refuter_ids"`
+	FixCausedFindings       []Finding                  `json:"fix_caused_findings"`
+	FollowUps               []FollowUp                 `json:"follow_ups"`
+	OriginalCriteria        *ValidationCheck           `json:"original_criteria,omitempty"`
+	CorrectionRegression    *ValidationCheck           `json:"correction_regression,omitempty"`
+	RiskLevel               RiskLevel                  `json:"risk_level,omitempty"`
+	SelectedLenses          []string                   `json:"selected_lenses,omitempty"`
+	LensResults             []LensResult               `json:"lens_results,omitempty"`
+	OriginalChangedLines    *int                       `json:"original_changed_lines,omitempty"`
+	CorrectionBudget        *int                       `json:"correction_budget,omitempty"`
+	ProposedCorrectionLines *int                       `json:"proposed_correction_lines,omitempty"`
+	ActualCorrectionLines   *int                       `json:"actual_correction_lines,omitempty"`
+	legacyCausality         bool
+	legacyCorrectionBudget  bool
 }
 
 func NewTransaction(start Start) (*Transaction, error) {
@@ -226,9 +245,19 @@ func NewTransaction(start Start) (*Transaction, error) {
 		FixCausedFindings: []Finding{}, FollowUps: []FollowUp{}, JudgeProofs: []JudgeProof{},
 	}
 	if start.Mode == ModeOrdinaryBounded {
+		if start.OriginalChangedLines == nil {
+			return nil, errors.New("new ordinary_bounded transactions require repository-derived original changed lines")
+		}
+		budget, err := CorrectionBudget(*start.OriginalChangedLines)
+		if err != nil {
+			return nil, err
+		}
 		transaction.RiskLevel = start.RiskLevel
 		transaction.SelectedLenses = selectedLenses
 		transaction.LensResults = []LensResult{}
+		originalChangedLines := *start.OriginalChangedLines
+		transaction.OriginalChangedLines = &originalChangedLines
+		transaction.CorrectionBudget = &budget
 	}
 	return transaction, nil
 }
@@ -259,6 +288,13 @@ func (transaction *Transaction) RecordLensResult(result LensResult) error {
 		return transaction.invalidTransition("record lens result")
 	}
 	result.Lens = strings.TrimSpace(result.Lens)
+	if result.Lens == "" {
+		next := len(transaction.LensResults)
+		if next >= len(transaction.SelectedLenses) {
+			return errors.New("no selected review lens remains for an omitted result lens")
+		}
+		result.Lens = transaction.SelectedLenses[next]
+	}
 	if !isSupportedLens(result.Lens) {
 		return fmt.Errorf("unknown review lens %q", result.Lens)
 	}
@@ -306,24 +342,41 @@ func validateLensResult(result LensResult) (LensResult, error) {
 		return LensResult{}, errors.New("lens result requires explicit findings and concrete evidence")
 	}
 	wantFindingLens := strings.TrimPrefix(result.Lens, "review-")
+	idPrefix := map[string]string{LensRisk: "R1", LensReadability: "R2", LensReliability: "R3", LensResilience: "R4"}[result.Lens]
+	findings := make([]Finding, len(result.Findings))
 	for index, finding := range result.Findings {
+		finding.ID = strings.TrimSpace(finding.ID)
+		if finding.ID == "" {
+			finding.ID = fmt.Sprintf("%s-%03d", idPrefix, index+1)
+		}
+		finding.Lens = strings.TrimSpace(finding.Lens)
+		if finding.Lens == "" {
+			finding.Lens = wantFindingLens
+		}
+		finding.Location = strings.TrimSpace(finding.Location)
+		finding.Severity = strings.ToUpper(strings.TrimSpace(finding.Severity))
+		finding.Claim = strings.TrimSpace(finding.Claim)
+		finding.ProofRefs = append([]string(nil), finding.ProofRefs...)
+		for proofIndex := range finding.ProofRefs {
+			finding.ProofRefs[proofIndex] = strings.TrimSpace(finding.ProofRefs[proofIndex])
+		}
 		if err := validateStructuredFinding(finding); err != nil {
 			return LensResult{}, fmt.Errorf("lens result finding[%d]: %w", index, err)
 		}
 		if finding.Lens != wantFindingLens {
 			return LensResult{}, fmt.Errorf("lens result finding[%d] is not bound to %q", index, result.Lens)
 		}
+		findings[index] = finding
 	}
-	for index, evidence := range result.Evidence {
-		if !isConcreteEvidence(evidence) {
+	evidence := make([]string, len(result.Evidence))
+	for index, item := range result.Evidence {
+		item = strings.TrimSpace(item)
+		if !isConcreteEvidence(item) {
 			return LensResult{}, fmt.Errorf("lens result evidence[%d] must be concrete", index)
 		}
+		evidence[index] = item
 	}
-	findings := make([]Finding, len(result.Findings))
-	copy(findings, result.Findings)
 	result.Findings = findings
-	evidence := make([]string, len(result.Evidence))
-	copy(evidence, result.Evidence)
 	result.Evidence = evidence
 	derived := LensResultHash(result)
 	if result.ResultHash != "" && result.ResultHash != derived {
@@ -331,6 +384,12 @@ func validateLensResult(result LensResult) (LensResult, error) {
 	}
 	result.ResultHash = derived
 	return result, nil
+}
+
+// CanonicalLensResult validates and derives the persisted identity for one
+// reviewer result without mutating a transaction.
+func CanonicalLensResult(result LensResult) (LensResult, error) {
+	return validateLensResult(result)
 }
 
 func (transaction *Transaction) RecordJudgeProofs(proofs []JudgeProof, agreementHash string) error {
@@ -423,6 +482,17 @@ func (transaction *Transaction) ClassifyEvidence(evidence []FindingEvidence) (Ev
 		if _, duplicate := byID[item.FindingID]; duplicate {
 			return EvidenceRoute{}, fmt.Errorf("duplicate evidence for finding %q", item.FindingID)
 		}
+		switch item.Class {
+		case EvidenceDeterministic, EvidenceInferential, EvidenceInsufficient:
+		default:
+			return EvidenceRoute{}, fmt.Errorf("unsupported evidence class %q", item.Class)
+		}
+		if !isSupportedCausalDisposition(item.Causality) {
+			return EvidenceRoute{}, fmt.Errorf("finding %q has unsupported causal disposition %q", item.FindingID, item.Causality)
+		}
+		if !isConcreteEvidence(item.Proof) {
+			return EvidenceRoute{}, fmt.Errorf("finding %q requires concrete causal proof", item.FindingID)
+		}
 		byID[item.FindingID] = item
 	}
 	if len(byID) != len(severe) {
@@ -435,15 +505,26 @@ func (transaction *Transaction) ClassifyEvidence(evidence []FindingEvidence) (Ev
 	outcomes := cloneOutcomes(transaction.Outcomes)
 	fixFindingIDs := append([]string{}, transaction.FixFindingIDs...)
 	pendingRefuterIDs := append([]string{}, transaction.PendingRefuterIDs...)
+	followUps := append([]FollowUp{}, transaction.FollowUps...)
 	for _, finding := range transaction.Findings {
 		if !isSevereSeverity(finding.Severity) {
 			continue
 		}
 		item, ok := byID[finding.ID]
-		if !ok || !isConcreteEvidence(item.Proof) {
-			return EvidenceRoute{}, fmt.Errorf("finding %q requires concrete evidence", finding.ID)
+		if !ok {
+			return EvidenceRoute{}, fmt.Errorf("finding %q requires evidence", finding.ID)
 		}
 		classifications[finding.ID] = item
+		switch item.Causality {
+		case CausalPreExisting, CausalBaseOnly:
+			outcomes[finding.ID] = OutcomeInfo
+			followUps = append(followUps, causalFollowUp(finding, item.Proof))
+			continue
+		case CausalUnknown:
+			outcomes[finding.ID] = OutcomeInconclusive
+			escalate = true
+			continue
+		}
 		switch item.Class {
 		case EvidenceDeterministic:
 			outcomes[finding.ID] = OutcomeCorroborated
@@ -473,6 +554,7 @@ func (transaction *Transaction) ClassifyEvidence(evidence []FindingEvidence) (Ev
 	transaction.Outcomes = outcomes
 	transaction.FixFindingIDs = fixFindingIDs
 	transaction.PendingRefuterIDs = pendingRefuterIDs
+	transaction.FollowUps = followUps
 	transaction.State = StateEvidenceClassified
 	if escalate {
 		for _, findingID := range transaction.PendingRefuterIDs {
@@ -544,12 +626,26 @@ func (transaction *Transaction) failRefuterBatch(cause error) error {
 	return cause
 }
 
-func (transaction *Transaction) BeginFix(failedEvidenceRevision string) error {
+func (transaction *Transaction) BeginFix(failedEvidenceRevision string, proposedCorrectionLines ...int) error {
 	if transaction.State != StateFixRequired {
 		return transaction.invalidTransition("begin fix")
 	}
 	if !validSHA256(failedEvidenceRevision) {
 		return errors.New("failed evidence revision must be a lowercase SHA-256 identity")
+	}
+	if transaction.hasCorrectionBudget() {
+		if len(proposedCorrectionLines) != 1 || proposedCorrectionLines[0] <= 0 {
+			return errors.New("begin fix requires a positive proposed correction-line forecast")
+		}
+		if proposedCorrectionLines[0] > *transaction.CorrectionBudget {
+			forecast := proposedCorrectionLines[0]
+			transaction.FailedEvidenceRevision = failedEvidenceRevision
+			transaction.ProposedCorrectionLines = &forecast
+			transaction.State = StateEscalated
+			return nil
+		}
+	} else if len(proposedCorrectionLines) != 0 {
+		return errors.New("correction-line forecasts apply only to new ordinary_bounded transactions")
 	}
 	switch transaction.Mode {
 	case ModeOrdinary4R, ModeOrdinaryBounded:
@@ -564,11 +660,15 @@ func (transaction *Transaction) BeginFix(failedEvidenceRevision string) error {
 		transaction.Counters.FixRounds++
 	}
 	transaction.FailedEvidenceRevision = failedEvidenceRevision
+	if transaction.hasCorrectionBudget() {
+		forecast := proposedCorrectionLines[0]
+		transaction.ProposedCorrectionLines = &forecast
+	}
 	transaction.State = StateFixing
 	return nil
 }
 
-func (transaction *Transaction) CompleteFix(snapshot Snapshot, fixDeltaHash string, ledgerIDs []string) error {
+func (transaction *Transaction) CompleteFix(snapshot Snapshot, fixDeltaHash string, ledgerIDs []string, actualCorrectionLines ...int) error {
 	if transaction.State != StateFixing {
 		return transaction.invalidTransition("complete fix")
 	}
@@ -592,9 +692,23 @@ func (transaction *Transaction) CompleteFix(snapshot Snapshot, fixDeltaHash stri
 	if err := pathsAreSubset(snapshot.Paths, genesisPaths); err != nil {
 		return err
 	}
+	if transaction.hasCorrectionBudget() {
+		if len(actualCorrectionLines) != 1 || actualCorrectionLines[0] < 0 {
+			return errors.New("complete fix requires repository-derived actual correction changed lines")
+		}
+		if actualCorrectionLines[0] > *transaction.CorrectionBudget {
+			return fmt.Errorf("actual correction is %d changed lines, exceeding the frozen budget of %d", actualCorrectionLines[0], *transaction.CorrectionBudget)
+		}
+	} else if len(actualCorrectionLines) != 0 {
+		return errors.New("actual correction lines apply only to new ordinary_bounded transactions")
+	}
 	transaction.Snapshot = snapshot
 	transaction.FinalCandidateTree = snapshot.CandidateTree
 	transaction.FixDeltaHash = FixDeltaHashForSnapshot(snapshot)
+	if transaction.hasCorrectionBudget() {
+		actual := actualCorrectionLines[0]
+		transaction.ActualCorrectionLines = &actual
+	}
 	transaction.State = StateFixValidating
 	return nil
 }
@@ -814,6 +928,31 @@ func ParseTransaction(payload []byte) (Transaction, error) {
 	return transaction, nil
 }
 
+func (transaction *Transaction) UnmarshalJSON(payload []byte) error {
+	type persistedTransaction Transaction
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var decoded persistedTransaction
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return errors.New("multiple JSON values in review transaction")
+	}
+	*transaction = Transaction(decoded)
+	if transaction.Mode == ModeOrdinaryBounded && transaction.OriginalChangedLines == nil && transaction.CorrectionBudget == nil {
+		transaction.legacyCorrectionBudget = true
+	}
+	for _, classification := range transaction.Classifications {
+		if classification.Causality == "" {
+			transaction.legacyCausality = true
+			break
+		}
+	}
+	return nil
+}
+
 func (transaction *Transaction) validate() error {
 	// v1 transactions did not persist follow-ups. Their absence is equivalent to
 	// the explicit empty array required by the current lifecycle.
@@ -837,6 +976,9 @@ func (transaction *Transaction) validate() error {
 	}
 	if transaction.Mode != ModeOrdinary4R && transaction.Mode != ModeOrdinaryBounded && transaction.Mode != ModeJudgmentDay {
 		return errors.New("invalid transaction mode")
+	}
+	if err := transaction.validateCorrectionBudget(); err != nil {
+		return err
 	}
 	if err := validateSnapshot(transaction.Snapshot); err != nil {
 		return err
@@ -933,6 +1075,51 @@ func (transaction *Transaction) validate() error {
 	}
 	if transaction.State == StateApproved && (!validSHA256(transaction.LedgerHash) || !validSHA256(transaction.EvidenceHash)) {
 		return errors.New("approved transaction requires ledger and evidence hashes")
+	}
+	return nil
+}
+
+func (transaction *Transaction) hasCorrectionBudget() bool {
+	return transaction.Mode == ModeOrdinaryBounded && transaction.OriginalChangedLines != nil && transaction.CorrectionBudget != nil
+}
+
+func (transaction *Transaction) validateCorrectionBudget() error {
+	if transaction.Mode != ModeOrdinaryBounded {
+		if transaction.OriginalChangedLines != nil || transaction.CorrectionBudget != nil || transaction.ProposedCorrectionLines != nil || transaction.ActualCorrectionLines != nil {
+			return errors.New("correction changed-line budget applies only to ordinary_bounded mode")
+		}
+		return nil
+	}
+	if transaction.OriginalChangedLines == nil || transaction.CorrectionBudget == nil {
+		if transaction.legacyCorrectionBudget && transaction.OriginalChangedLines == nil && transaction.CorrectionBudget == nil && transaction.ProposedCorrectionLines == nil && transaction.ActualCorrectionLines == nil {
+			return nil
+		}
+		return errors.New("ordinary_bounded correction budget fields are incomplete")
+	}
+	wantBudget, err := CorrectionBudget(*transaction.OriginalChangedLines)
+	if err != nil || *transaction.CorrectionBudget != wantBudget {
+		return errors.New("ordinary_bounded correction budget does not match original changed lines")
+	}
+	if transaction.Counters.FixBatches == 0 {
+		if transaction.State == StateEscalated && transaction.ProposedCorrectionLines != nil && *transaction.ProposedCorrectionLines > wantBudget && transaction.ActualCorrectionLines == nil && validSHA256(transaction.FailedEvidenceRevision) {
+			return nil
+		}
+		if transaction.ProposedCorrectionLines != nil || transaction.ActualCorrectionLines != nil {
+			return errors.New("unused correction budget cannot contain forecast or actual lines")
+		}
+		return nil
+	}
+	if transaction.ProposedCorrectionLines == nil || *transaction.ProposedCorrectionLines <= 0 || *transaction.ProposedCorrectionLines > wantBudget {
+		return errors.New("ordinary_bounded active correction requires an in-budget positive forecast")
+	}
+	if transaction.State == StateFixing {
+		if transaction.ActualCorrectionLines != nil {
+			return errors.New("fixing transaction cannot contain actual correction lines")
+		}
+		return nil
+	}
+	if transaction.ActualCorrectionLines == nil || *transaction.ActualCorrectionLines < 0 || *transaction.ActualCorrectionLines > wantBudget {
+		return errors.New("completed ordinary_bounded correction requires in-budget actual lines")
 	}
 	return nil
 }
@@ -1228,7 +1415,7 @@ func (transaction *Transaction) validateFindingRouting() error {
 			}
 		} else if hasOutcome {
 			switch outcome {
-			case OutcomeCorroborated, OutcomeRefuted, OutcomeInconclusive:
+			case OutcomeCorroborated, OutcomeRefuted, OutcomeInconclusive, OutcomeInfo:
 			default:
 				return fmt.Errorf("severe finding %q has invalid outcome %q", finding.ID, outcome)
 			}
@@ -1243,6 +1430,13 @@ func (transaction *Transaction) validateFindingRouting() error {
 		case EvidenceDeterministic, EvidenceInferential, EvidenceInsufficient:
 		default:
 			return fmt.Errorf("evidence classification %q has invalid class %q", id, classification.Class)
+		}
+		if classification.Causality == "" {
+			if !transaction.legacyCausality {
+				return fmt.Errorf("evidence classification %q requires causal disposition", id)
+			}
+		} else if !isSupportedCausalDisposition(classification.Causality) {
+			return fmt.Errorf("evidence classification %q has invalid causal disposition %q", id, classification.Causality)
 		}
 	}
 	for id := range transaction.Outcomes {
@@ -1315,7 +1509,7 @@ func (transaction *Transaction) validateFindingState(findings, severe map[string
 	fixSet := stringSet(transaction.FixFindingIDs)
 	pendingSet := stringSet(transaction.PendingRefuterIDs)
 	corroborated := make(map[string]struct{})
-	hasInsufficient := false
+	hasEscalatingClassification := false
 	hasResolvedInferential := false
 	for id := range severe {
 		classification, classified := transaction.Classifications[id]
@@ -1325,6 +1519,19 @@ func (transaction *Transaction) validateFindingState(findings, severe map[string
 		outcome, hasOutcome := transaction.Outcomes[id]
 		_, fix := fixSet[id]
 		_, pending := pendingSet[id]
+		if classification.Causality == CausalPreExisting || classification.Causality == CausalBaseOnly {
+			if !hasOutcome || outcome != OutcomeInfo || fix || pending || !hasFollowUp(transaction.FollowUps, causalFollowUp(severe[id], classification.Proof)) {
+				return fmt.Errorf("non-causal severe finding %q must remain a non-blocking follow-up", id)
+			}
+			continue
+		}
+		if classification.Causality == CausalUnknown {
+			hasEscalatingClassification = true
+			if !hasOutcome || outcome != OutcomeInconclusive || fix || pending || transaction.State != StateEscalated {
+				return fmt.Errorf("unknown-causality severe finding %q must terminally escalate as inconclusive", id)
+			}
+			continue
+		}
 		switch classification.Class {
 		case EvidenceDeterministic:
 			if !hasOutcome || outcome != OutcomeCorroborated || !fix || pending {
@@ -1358,7 +1565,7 @@ func (transaction *Transaction) validateFindingState(findings, severe map[string
 				return fmt.Errorf("non-corroborated inferential finding %q cannot enter correction", id)
 			}
 		case EvidenceInsufficient:
-			hasInsufficient = true
+			hasEscalatingClassification = true
 			if !hasOutcome || outcome != OutcomeInconclusive || fix || pending || transaction.State != StateEscalated {
 				return fmt.Errorf("insufficient severe finding %q must terminally escalate as inconclusive", id)
 			}
@@ -1388,7 +1595,7 @@ func (transaction *Transaction) validateFindingState(findings, severe map[string
 			}
 		}
 	}
-	if isOrdinaryMode(transaction.Mode) && hasResolvedInferential && !hasInsufficient && transaction.Counters.RefuterBatches != 1 {
+	if isOrdinaryMode(transaction.Mode) && hasResolvedInferential && !hasEscalatingClassification && transaction.Counters.RefuterBatches != 1 {
 		return errors.New("resolved ordinary inferential findings require exactly one consumed refuter batch")
 	}
 	return transaction.validateResolutionCounters(len(corroborated) > 0)
@@ -1522,6 +1729,36 @@ func isConcreteEvidence(value string) bool {
 		return false
 	}
 	return true
+}
+
+func isSupportedCausalDisposition(disposition CausalDisposition) bool {
+	switch disposition {
+	case CausalIntroduced, CausalBehaviorActivated, CausalWorsened, CausalPreExisting, CausalBaseOnly, CausalUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func causalFollowUp(finding Finding, proof string) FollowUp {
+	observation := strings.TrimSpace(finding.Claim)
+	if observation == "" {
+		observation = finding.ID
+	}
+	proofRefs := append([]string{}, finding.ProofRefs...)
+	if stringIndex(proofRefs, proof) < 0 {
+		proofRefs = append(proofRefs, proof)
+	}
+	return FollowUp{Observation: observation, ProofRefs: proofRefs}
+}
+
+func hasFollowUp(followUps []FollowUp, want FollowUp) bool {
+	for _, followUp := range followUps {
+		if followUp.Observation == want.Observation && equalStrings(followUp.ProofRefs, want.ProofRefs) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateStructuredFinding(finding Finding) error {

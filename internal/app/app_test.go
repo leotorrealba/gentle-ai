@@ -334,7 +334,7 @@ func TestRunArgsDispatchesNativeReviewOperationsBeforePlatformValidation(t *test
 		{command: "review-start", want: "review-start requires --cwd, --lineage, and --policy-file"},
 		{command: "review-resume", want: "review-resume requires --cwd and --lineage"},
 		{command: "review-bundle-export", want: "review-bundle-export requires --cwd, --lineage, and --out"},
-		{command: "review-bundle-import", want: "review-bundle-import requires --cwd, --bundle, and --request"},
+		{command: "review-bundle-import", want: "review-bundle-import requires --cwd and --bundle"},
 		{command: "review-validate", want: "review-validate requires --cwd and --receipt"},
 	} {
 		t.Run(test.command, func(t *testing.T) {
@@ -358,6 +358,20 @@ func TestRunArgsReviewSubcommandHelpExitsSuccessfully(t *testing.T) {
 				t.Fatalf("RunArgs(%s --help) output:\n%s", command, output.String())
 			}
 		})
+	}
+}
+
+func TestRunArgsDispatchesCompactReviewFacadeBeforePlatformValidation(t *testing.T) {
+	origEnsure := ensureCurrentOSSupported
+	t.Cleanup(func() { ensureCurrentOSSupported = origEnsure })
+	ensureCurrentOSSupported = func() error { return fmt.Errorf("unsupported platform") }
+
+	var output bytes.Buffer
+	if err := RunArgs([]string{"review", "--help"}, &output); err != nil {
+		t.Fatalf("RunArgs(review --help) error = %v", err)
+	}
+	if !strings.Contains(output.String(), "review <start|finalize|validate>") {
+		t.Fatalf("compact review help missing:\n%s", output.String())
 	}
 }
 

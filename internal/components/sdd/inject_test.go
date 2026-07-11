@@ -888,6 +888,17 @@ func TestInjectOpenCodeUpgradesV1DelegationLensTable(t *testing.T) {
 	}
 }
 
+func TestEnsurePreservedOpenCodeDelegationHardGatesMigratesCanonicalReviewCommand(t *testing.T) {
+	legacy := "before commit, push, or PR after code changes, run the concrete review lens(es) selected by Review Lens Selection unless the diff is trivial (tier 1)"
+	got := ensurePreservedOpenCodeDelegationHardGates(legacy)
+	if !strings.Contains(got, "`gentle-ai review validate --gate <gate> --cwd <repo>`") {
+		t.Fatalf("migrated delegation gates missing canonical review command:\n%s", got)
+	}
+	if strings.Contains(got, "native review validate --gate") {
+		t.Fatalf("migrated delegation gates retained non-existent command:\n%s", got)
+	}
+}
+
 func TestInjectOpenCodeUpgradesPreservedV1ReviewExecutionContract(t *testing.T) {
 	home := t.TempDir()
 	mockNoPackageManager(t)
@@ -4909,7 +4920,7 @@ func TestInjectWritesNativeReviewAgentFiles(t *testing.T) {
 			}
 
 			for _, agent := range reviewAgentNames {
-				assertNativeAgentFile(t, filepath.Join(tt.agentsDir(home), agent+".md"), "No findings.")
+				assertNativeAgentFile(t, filepath.Join(tt.agentsDir(home), agent+".md"), `"findings":[]`)
 				for _, ext := range tt.extraExts {
 					want := tt.extraContains[ext]
 					if ext == ".yaml" {

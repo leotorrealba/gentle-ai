@@ -1,6 +1,7 @@
 package reviewtransaction
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -16,8 +17,8 @@ func TestOrdinaryTransactionIsOneBoundedNonIterativeFlow(t *testing.T) {
 	}
 
 	route, err := tx.ClassifyEvidence([]FindingEvidence{
-		{FindingID: "R1-DET", Class: EvidenceDeterministic, Proof: "go test exited 1"},
-		{FindingID: "R2-INF", Class: EvidenceInferential, Proof: "race requires interpretation"},
+		{FindingID: "R1-DET", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "go test exited 1"},
+		{FindingID: "R2-INF", Class: EvidenceInferential, Causality: CausalIntroduced, Proof: "race requires interpretation"},
 	})
 	if err != nil {
 		t.Fatalf("ClassifyEvidence() error = %v", err)
@@ -111,7 +112,7 @@ func TestJudgmentDayCarriesEarlierSevereFixCausedFindingIntoNextCorrection(t *te
 	_ = tx.StartReview()
 	_ = tx.RecordJudgeProofs([]JudgeProof{{JudgeID: "a", ExecutionHash: hash("1"), ResultHash: hash("2"), Blind: true, Confirmed: true}, {JudgeID: "b", ExecutionHash: hash("3"), ResultHash: hash("4"), Blind: true, Confirmed: true}}, hash("5"))
 	_ = freezeTestFindings(tx, []Finding{{ID: "JD-001", Severity: "CRITICAL"}})
-	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "JD-001", Class: EvidenceDeterministic, Proof: "reproduced"}})
+	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "JD-001", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "reproduced"}})
 	_ = tx.BeginFix(hash("7"))
 	fix := tx.Snapshot
 	fix.Kind, fix.BaseTree, fix.CandidateTree, fix.LedgerIDs, fix.Identity = TargetFixDiff, tx.FinalCandidateTree, tree("c"), []string{"JD-001"}, hash("8")
@@ -144,6 +145,88 @@ func TestCompleteFixDerivesDeltaIdentityInsteadOfTrustingCallerArtifact(t *testi
 	}
 }
 
+func TestBudgetedBeginFixRejectsInvalidForecastBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name          string
+		forecast      int
+		wantErr       bool
+		wantEscalated bool
+	}{
+		{name: "zero", forecast: 0, wantErr: true},
+		{name: "within", forecast: 1},
+		{name: "exact", forecast: 98},
+		{name: "over", forecast: 99, wantEscalated: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := budgetedAtFixRequired(t, 196)
+			before := mustMarshalTransaction(t, *tx)
+			err := tx.BeginFix(hash("2"), tt.forecast)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("BeginFix() accepted invalid correction forecast")
+				}
+				if got := mustMarshalTransaction(t, *tx); !bytes.Equal(got, before) {
+					t.Fatalf("rejected forecast mutated transaction:\nbefore=%s\nafter=%s", before, got)
+				}
+				return
+			}
+			if tt.wantEscalated {
+				if err != nil || tx.State != StateEscalated || tx.Counters.FixBatches != 0 || tx.ProposedCorrectionLines == nil || *tx.ProposedCorrectionLines != tt.forecast || tx.FailedEvidenceRevision != hash("2") {
+					t.Fatalf("BeginFix(over budget) = state %q counters %#v forecast %v evidence %q err %v", tx.State, tx.Counters, tx.ProposedCorrectionLines, tx.FailedEvidenceRevision, err)
+				}
+				if retryErr := tx.BeginFix(hash("3"), 1); retryErr == nil {
+					t.Fatal("escalated forecast remained retryable")
+				}
+				return
+			}
+			if err != nil || tx.State != StateFixing || tx.Counters.FixBatches != 1 || tx.ProposedCorrectionLines == nil || *tx.ProposedCorrectionLines != tt.forecast {
+				t.Fatalf("BeginFix() = state %q counters %#v forecast %v err %v", tx.State, tx.Counters, tx.ProposedCorrectionLines, err)
+			}
+		})
+	}
+}
+
+func TestBudgetedCompleteFixRejectsOverBudgetActualBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name    string
+		actual  int
+		wantErr bool
+	}{
+		{name: "within", actual: 1},
+		{name: "exact", actual: 98},
+		{name: "over", actual: 99, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := budgetedAtFixRequired(t, 196)
+			if err := tx.BeginFix(hash("2"), 98); err != nil {
+				t.Fatal(err)
+			}
+			fix := tx.Snapshot
+			fix.Kind, fix.BaseTree, fix.CandidateTree = TargetFixDiff, tx.FinalCandidateTree, tree("c")
+			fix.LedgerIDs, fix.Identity = []string{"REL-001"}, hash("3")
+			before := mustMarshalTransaction(t, *tx)
+			err := tx.CompleteFix(fix, hash("4"), fix.LedgerIDs, tt.actual)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("CompleteFix() accepted over-budget actual correction")
+				}
+				if got := mustMarshalTransaction(t, *tx); !bytes.Equal(got, before) {
+					t.Fatalf("rejected actual correction mutated transaction:\nbefore=%s\nafter=%s", before, got)
+				}
+				return
+			}
+			if err != nil || tx.State != StateFixValidating || tx.ActualCorrectionLines == nil || *tx.ActualCorrectionLines != tt.actual {
+				t.Fatalf("CompleteFix() = state %q actual %v err %v", tx.State, tx.ActualCorrectionLines, err)
+			}
+			if tx.RiskLevel != RiskMedium || !equalStrings(tx.SelectedLenses, []string{LensReliability}) || *tx.OriginalChangedLines != 196 || *tx.CorrectionBudget != 98 {
+				t.Fatalf("correction changed frozen risk inputs: %#v", tx)
+			}
+		})
+	}
+}
+
 func mustMarshalTransaction(t *testing.T, transaction Transaction) []byte {
 	t.Helper()
 	payload, err := json.Marshal(transaction)
@@ -157,7 +240,7 @@ func TestInsufficientEvidenceIsInconclusiveAndNeverAutoFixed(t *testing.T) {
 	tx := newTestTransaction(t, ModeOrdinary4R)
 	_ = tx.StartReview()
 	_ = freezeTestFindings(tx, []Finding{{ID: "R3-INS", Severity: "CRITICAL"}})
-	route, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R3-INS", Class: EvidenceInsufficient, Proof: "no observable behavior"}})
+	route, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R3-INS", Class: EvidenceInsufficient, Causality: CausalUnknown, Proof: "no observable behavior"}})
 	if err != nil {
 		t.Fatalf("ClassifyEvidence() error = %v", err)
 	}
@@ -166,6 +249,154 @@ func TestInsufficientEvidenceIsInconclusiveAndNeverAutoFixed(t *testing.T) {
 	}
 	if tx.State != StateEscalated {
 		t.Fatalf("State = %q, want escalated", tx.State)
+	}
+}
+
+func TestCausalDispositionControlsDeterministicSevereAdmission(t *testing.T) {
+	tests := []struct {
+		name        string
+		causality   CausalDisposition
+		wantState   State
+		wantOutcome EvidenceOutcome
+		wantFix     bool
+		wantFollow  bool
+	}{
+		{name: "introduced", causality: CausalIntroduced, wantState: StateFixRequired, wantOutcome: OutcomeCorroborated, wantFix: true},
+		{name: "behavior activated", causality: CausalBehaviorActivated, wantState: StateFixRequired, wantOutcome: OutcomeCorroborated, wantFix: true},
+		{name: "worsened", causality: CausalWorsened, wantState: StateFixRequired, wantOutcome: OutcomeCorroborated, wantFix: true},
+		{name: "pre-existing", causality: CausalPreExisting, wantState: StateReadyFinalVerification, wantOutcome: OutcomeInfo, wantFollow: true},
+		{name: "base only", causality: CausalBaseOnly, wantState: StateReadyFinalVerification, wantOutcome: OutcomeInfo, wantFollow: true},
+		{name: "unknown", causality: CausalUnknown, wantState: StateEscalated, wantOutcome: OutcomeInconclusive},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := newTestTransaction(t, ModeOrdinary4R)
+			_ = tx.StartReview()
+			finding := Finding{ID: "R1-001", Severity: "CRITICAL", Claim: "observable severe defect", ProofRefs: []string{"internal/example.go:12"}}
+			_ = freezeTestFindings(tx, []Finding{finding})
+			route, err := tx.ClassifyEvidence([]FindingEvidence{{
+				FindingID: finding.ID, Class: EvidenceDeterministic, Causality: tt.causality, Proof: "candidate/base differential proof",
+			}})
+			if err != nil {
+				t.Fatalf("ClassifyEvidence() error = %v", err)
+			}
+			if tx.State != tt.wantState || tx.Outcomes[finding.ID] != tt.wantOutcome || (len(tx.FixFindingIDs) == 1) != tt.wantFix || (len(route.AutoFixFindingIDs) == 1) != tt.wantFix || (len(tx.FollowUps) == 1) != tt.wantFollow {
+				t.Fatalf("route = %#v state=%q outcomes=%#v fixes=%v follow-ups=%#v", route, tx.State, tx.Outcomes, tx.FixFindingIDs, tx.FollowUps)
+			}
+			if tt.wantFollow && !hasFollowUp(tx.FollowUps, causalFollowUp(finding, "candidate/base differential proof")) {
+				t.Fatalf("unrelated finding proof was not preserved: %#v", tx.FollowUps)
+			}
+		})
+	}
+}
+
+func TestMixedCausalLedgerCorrectsOnlyCandidateCausalFindings(t *testing.T) {
+	tx := newTestTransaction(t, ModeOrdinary4R)
+	_ = tx.StartReview()
+	findings := []Finding{
+		{ID: "R1-INTRO", Severity: "CRITICAL", Claim: "candidate introduced failure"},
+		{ID: "R2-WORSE", Severity: "BLOCKER", Claim: "candidate worsened race"},
+		{ID: "R3-PRE", Severity: "CRITICAL", Claim: "defect exists unchanged on base"},
+		{ID: "R4-BASE", Severity: "BLOCKER", Claim: "failure occurs only on base"},
+	}
+	_ = freezeTestFindings(tx, findings)
+	route, err := tx.ClassifyEvidence([]FindingEvidence{
+		{FindingID: "R1-INTRO", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "changed hunk fails focused test"},
+		{FindingID: "R2-WORSE", Class: EvidenceInferential, Causality: CausalWorsened, Proof: "candidate trace increases race window"},
+		{FindingID: "R3-PRE", Class: EvidenceDeterministic, Causality: CausalPreExisting, Proof: "same test fails on base and candidate"},
+		{FindingID: "R4-BASE", Class: EvidenceDeterministic, Causality: CausalBaseOnly, Proof: "test fails on base and passes on candidate"},
+	})
+	if err != nil {
+		t.Fatalf("ClassifyEvidence() error = %v", err)
+	}
+	if tx.State != StateEvidenceClassified || !equalStrings(tx.FixFindingIDs, []string{"R1-INTRO"}) || !equalStrings(tx.PendingRefuterIDs, []string{"R2-WORSE"}) || len(route.RefuterClaims) != 1 || len(tx.FollowUps) != 2 {
+		t.Fatalf("mixed classification route = %#v transaction=%#v", route, tx)
+	}
+	if err := tx.ApplyRefuterOutcomes([]EvidenceResult{{FindingID: "R2-WORSE", Outcome: OutcomeCorroborated, Proof: "independent before/after trace"}}); err != nil {
+		t.Fatalf("ApplyRefuterOutcomes() error = %v", err)
+	}
+	if tx.State != StateFixRequired || !equalStrings(tx.FixFindingIDs, []string{"R1-INTRO", "R2-WORSE"}) || len(tx.FollowUps) != 2 {
+		t.Fatalf("mixed resolved ledger = state %q fixes %v follow-ups %#v", tx.State, tx.FixFindingIDs, tx.FollowUps)
+	}
+}
+
+func TestClassifyEvidenceRejectsMissingOrInvalidCausalityBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		causality CausalDisposition
+	}{
+		{name: "missing"},
+		{name: "invalid", causality: "candidate-adjacent"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := newTestTransaction(t, ModeOrdinary4R)
+			_ = tx.StartReview()
+			_ = freezeTestFindings(tx, []Finding{{ID: "R1-001", Severity: "CRITICAL"}})
+			before := string(mustMarshalTransaction(t, *tx))
+			if _, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-001", Class: EvidenceDeterministic, Causality: tt.causality, Proof: "concrete differential proof"}}); err == nil {
+				t.Fatal("ClassifyEvidence() accepted missing or invalid causality")
+			}
+			if after := string(mustMarshalTransaction(t, *tx)); after != before {
+				t.Fatalf("rejected classification mutated transaction\nbefore: %s\nafter:  %s", before, after)
+			}
+		})
+	}
+}
+
+func TestJudgmentDayCorroborationDoesNotBypassCausalScope(t *testing.T) {
+	tests := []struct {
+		name      string
+		class     EvidenceClass
+		causality CausalDisposition
+		wantState State
+		wantFix   bool
+	}{
+		{name: "candidate causal inferential agreement", class: EvidenceInferential, causality: CausalBehaviorActivated, wantState: StateFixRequired, wantFix: true},
+		{name: "pre-existing deterministic agreement", class: EvidenceDeterministic, causality: CausalPreExisting, wantState: StateReadyFinalVerification},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := newTestTransaction(t, ModeJudgmentDay)
+			_ = tx.StartReview()
+			_ = tx.RecordJudgeProofs([]JudgeProof{
+				{JudgeID: "judge-a", ExecutionHash: hash("1"), ResultHash: hash("2"), Blind: true, Confirmed: true},
+				{JudgeID: "judge-b", ExecutionHash: hash("3"), ResultHash: hash("4"), Blind: true, Confirmed: true},
+			}, hash("5"))
+			_ = freezeTestFindings(tx, []Finding{{ID: "JD-001", Severity: "CRITICAL", Claim: "agreed defect"}})
+			route, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: "JD-001", Class: tt.class, Causality: tt.causality, Proof: "two-judge concrete scope proof"}})
+			if err != nil {
+				t.Fatalf("ClassifyEvidence() error = %v", err)
+			}
+			if tx.State != tt.wantState || (len(tx.FixFindingIDs) == 1) != tt.wantFix || (len(route.AutoFixFindingIDs) == 1) != tt.wantFix || len(route.RefuterClaims) != 0 {
+				t.Fatalf("Judgment Day causal route = %#v state=%q fixes=%v", route, tx.State, tx.FixFindingIDs)
+			}
+		})
+	}
+}
+
+func TestTransactionCausalityRoundTripAndLegacyReadCompatibility(t *testing.T) {
+	tx := newTestTransaction(t, ModeOrdinary4R)
+	_ = tx.StartReview()
+	_ = freezeTestFindings(tx, []Finding{{ID: "R1-001", Severity: "CRITICAL"}})
+	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-001", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "changed hunk fails focused test"}})
+	payload := mustMarshalTransaction(t, *tx)
+	parsed, err := ParseTransaction(payload)
+	if err != nil {
+		t.Fatalf("ParseTransaction(new) error = %v", err)
+	}
+	if got := parsed.Classifications["R1-001"].Causality; got != CausalIntroduced || parsed.legacyCausality {
+		t.Fatalf("new causality round trip = %q legacy=%v", got, parsed.legacyCausality)
+	}
+
+	legacyPayload := []byte(strings.Replace(string(payload), `"causal_disposition":"introduced",`, "", 1))
+	legacy, err := ParseTransaction(legacyPayload)
+	if err != nil {
+		t.Fatalf("ParseTransaction(legacy) error = %v", err)
+	}
+	if !legacy.legacyCausality || legacy.Classifications["R1-001"].Causality != "" || legacy.State != StateFixRequired || !equalStrings(legacy.FixFindingIDs, []string{"R1-001"}) {
+		t.Fatalf("legacy classification was not preserved fail-closed: %#v", legacy)
 	}
 }
 
@@ -191,8 +422,8 @@ func TestMalformedRefuterBatchIsConsumedAndTerminal(t *testing.T) {
 				{ID: "R3-INF", Severity: "BLOCKER"},
 			})
 			_, _ = tx.ClassifyEvidence([]FindingEvidence{
-				{FindingID: "R2-INF", Class: EvidenceInferential, Proof: "race requires interpretation"},
-				{FindingID: "R3-INF", Class: EvidenceInferential, Proof: "ordering requires interpretation"},
+				{FindingID: "R2-INF", Class: EvidenceInferential, Causality: CausalIntroduced, Proof: "race requires interpretation"},
+				{FindingID: "R3-INF", Class: EvidenceInferential, Causality: CausalWorsened, Proof: "ordering requires interpretation"},
 			})
 
 			if err := tx.ApplyRefuterOutcomes(tt.results); err == nil {
@@ -229,8 +460,8 @@ func TestOnlySevereFindingsEnterEvidenceRouting(t *testing.T) {
 		t.Fatalf("FreezeFindings() error = %v", err)
 	}
 	route, err := tx.ClassifyEvidence([]FindingEvidence{
-		{FindingID: "R1-BLOCKER", Class: EvidenceDeterministic, Proof: "failing security test"},
-		{FindingID: "R2-CRITICAL", Class: EvidenceInferential, Proof: "concurrency trace"},
+		{FindingID: "R1-BLOCKER", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "failing security test"},
+		{FindingID: "R2-CRITICAL", Class: EvidenceInferential, Causality: CausalWorsened, Proof: "concurrency trace"},
 	})
 	if err != nil {
 		t.Fatalf("ClassifyEvidence() error = %v", err)
@@ -297,7 +528,7 @@ func TestJudgmentDayHasExactlyTwoFixAndScopedRejudgmentRounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = freezeTestFindings(tx, []Finding{{ID: "JD-001", Severity: "CRITICAL"}})
-	if _, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: "JD-001", Class: EvidenceDeterministic, Proof: "confirmed by both judges"}}); err != nil {
+	if _, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: "JD-001", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "confirmed by both judges"}}); err != nil {
 		t.Fatalf("ClassifyEvidence() error = %v", err)
 	}
 	for round := 1; round <= 2; round++ {
@@ -452,9 +683,9 @@ func TestMultipleFrozenFindingsShareOneFixBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := tx.ClassifyEvidence([]FindingEvidence{
-		{FindingID: "R1-001", Class: EvidenceDeterministic, Proof: "first work unit"},
-		{FindingID: "R1-002", Class: EvidenceDeterministic, Proof: "second work unit"},
-		{FindingID: "R1-003", Class: EvidenceDeterministic, Proof: "third work unit"},
+		{FindingID: "R1-001", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "first work unit"},
+		{FindingID: "R1-002", Class: EvidenceDeterministic, Causality: CausalBehaviorActivated, Proof: "second work unit"},
+		{FindingID: "R1-003", Class: EvidenceDeterministic, Causality: CausalWorsened, Proof: "third work unit"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -500,8 +731,34 @@ func ordinaryAtFixing(t *testing.T) *Transaction {
 	tx := newTestTransaction(t, ModeOrdinary4R)
 	_ = tx.StartReview()
 	_ = freezeTestFindings(tx, []Finding{{ID: "R1-DET", Severity: "CRITICAL"}})
-	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-DET", Class: EvidenceDeterministic, Proof: "failing test"}})
+	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-DET", Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "failing test"}})
 	_ = tx.BeginFix(hash("2"))
+	return tx
+}
+
+func budgetedAtFixRequired(t *testing.T, originalChangedLines int) *Transaction {
+	t.Helper()
+	tx, err := NewTransaction(Start{
+		LineageID: "budgeted-lineage", Mode: ModeOrdinaryBounded, Generation: 1,
+		Snapshot: newTestTransaction(t, ModeOrdinary4R).Snapshot, PolicyHash: hash("d"),
+		RiskLevel: RiskMedium, SelectedLenses: []string{LensReliability}, OriginalChangedLines: &originalChangedLines,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.StartReview(); err != nil {
+		t.Fatal(err)
+	}
+	finding := Finding{ID: "REL-001", Lens: "reliability", Location: "internal/example.go:1", Severity: "CRITICAL", Claim: "candidate regression", ProofRefs: []string{"focused test failed"}}
+	if err := tx.RecordLensResult(LensResult{Lens: LensReliability, Findings: []Finding{finding}, Evidence: []string{"focused test exited 1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := freezeTestFindings(tx, []Finding{finding}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: finding.ID, Class: EvidenceDeterministic, Causality: CausalIntroduced, Proof: "changed hunk causes focused test failure"}}); err != nil {
+		t.Fatal(err)
+	}
 	return tx
 }
 

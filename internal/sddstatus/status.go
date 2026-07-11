@@ -334,13 +334,7 @@ func Resolve(options ResolveOptions) (Status, error) {
 		&status,
 		workspaceRoot,
 		firstPath(artifactPaths.ReviewReceipt),
-		firstPath(artifactPaths.ReviewBundle),
-		firstPath(artifactPaths.ReviewContext),
-		firstPath(artifactPaths.ReviewState),
-		firstPath(artifactPaths.ReviewPolicy),
-		firstPath(artifactPaths.ReviewLedger),
-		firstPath(artifactPaths.VerifyReport),
-		"", "", "", "", "", "", "",
+		"",
 	)
 	if options.IncludeInstructions {
 		instructions := renderPhaseInstructions(status)
@@ -427,14 +421,8 @@ func resolveEngramStatus(workspaceRoot string, requestedChange string, includeIn
 	applyReviewGate(
 		&status,
 		workspaceRoot,
-		"", "", "", "", "", "", "",
+		"",
 		artifactsByType["review/receipt"].Content,
-		artifactsByType["review/chain-bundle"].Content,
-		artifactsByType["review/gate-context"].Content,
-		artifactsByType["review/transaction"].Content,
-		artifactsByType["review/policy"].Content,
-		artifactsByType["review/ledger"].Content,
-		artifactsByType["verify-report"].Content,
 	)
 	if includeInstructions {
 		instructions := renderPhaseInstructions(status)
@@ -741,10 +729,9 @@ func RenderDispatcherMarkdown(status Status) string {
 		lines = append(lines,
 			"",
 			"### Next Review Operation",
-			"- Build an explicit newline-delimited intended-untracked manifest outside the repository.",
-			fmt.Sprintf("- Run `gentle-ai review-start --cwd %q --lineage <new-lineage-id> --policy-file <policy-path> --intended-untracked-manifest <manifest-path>`.", status.ActionContext.WorkspaceRoot),
-			"- The repository Git common directory plus canonical lineage ID determines the authoritative CAS store; continue the existing transaction instead of starting another budget.",
-			"- Do not write artifact-store mirror files during review. Reconcile transaction, ledger, receipt, chain-bundle, and gate-context mirrors only at the final reconcile-terminal-mirrors step after review-validate allows.",
+			fmt.Sprintf("- Run `gentle-ai review start --cwd %q`; the facade derives intended untracked scope, lineage, tier, lenses, and correction budget from live Git.", status.ActionContext.WorkspaceRoot),
+			"- Pass reviewer result and verification evidence to `gentle-ai review finalize`; do not hand-author lifecycle operation JSON.",
+			"- Continue discovered authority instead of starting another budget, and reconcile existing terminal mirrors only after `gentle-ai review validate --gate post-apply` allows.",
 		)
 	}
 

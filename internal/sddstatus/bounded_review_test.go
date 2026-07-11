@@ -24,14 +24,31 @@ func TestResolveArchiveRequiresApprovedExactReviewReceipt(t *testing.T) {
 		wantReason  string
 	}{
 		{
-			name: "missing receipt invalidates archive",
+			name: "missing receipt mirror discovers native receipt",
 			mutate: func(t *testing.T, changeRoot string, _ reviewtransaction.Receipt, _ reviewtransaction.GateRequest) {
 				if err := os.Remove(filepath.Join(changeRoot, "reviews", "receipt.json")); err != nil {
 					t.Fatal(err)
 				}
 			},
+			wantGate: reviewtransaction.GateAllow, wantArchive: DependencyReady, wantNext: "archive",
+		},
+		{
+			name: "missing every receipt invalidates archive",
+			mutate: func(t *testing.T, changeRoot string, _ reviewtransaction.Receipt, _ reviewtransaction.GateRequest) {
+				if err := os.Remove(filepath.Join(changeRoot, "reviews", "receipt.json")); err != nil {
+					t.Fatal(err)
+				}
+				repo := filepath.Dir(filepath.Dir(filepath.Dir(changeRoot)))
+				store, err := reviewtransaction.AuthoritativeStore(context.Background(), repo, "thin-lineage")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(filepath.Join(store.Dir, "artifacts", "receipt.json")); err != nil {
+					t.Fatal(err)
+				}
+			},
 			wantGate: reviewtransaction.GateInvalidated, wantArchive: DependencyBlocked,
-			wantNext: "resolve-review", wantReason: "approved review receipt is missing",
+			wantNext: "resolve-review", wantReason: "terminal review receipt is missing",
 		},
 		{
 			name:     "exact authoritative artifacts allow archive",
@@ -40,45 +57,41 @@ func TestResolveArchiveRequiresApprovedExactReviewReceipt(t *testing.T) {
 			wantNext: "archive",
 		},
 		{
-			name: "missing transaction invalidates archive",
+			name: "missing transaction mirror preserves native authority",
 			mutate: func(t *testing.T, changeRoot string, _ reviewtransaction.Receipt, _ reviewtransaction.GateRequest) {
 				if err := os.Remove(filepath.Join(changeRoot, "reviews", "transaction.json")); err != nil {
 					t.Fatal(err)
 				}
 			},
-			wantGate: reviewtransaction.GateInvalidated, wantArchive: DependencyBlocked,
-			wantNext: "resolve-review", wantReason: "transaction",
+			wantGate: reviewtransaction.GateAllow, wantArchive: DependencyReady, wantNext: "archive",
 		},
 		{
-			name: "missing portable chain bundle invalidates archive",
+			name: "missing portable chain bundle preserves native authority",
 			mutate: func(t *testing.T, changeRoot string, _ reviewtransaction.Receipt, _ reviewtransaction.GateRequest) {
 				if err := os.Remove(filepath.Join(changeRoot, "reviews", "chain-bundle.json")); err != nil {
 					t.Fatal(err)
 				}
 			},
-			wantGate: reviewtransaction.GateInvalidated, wantArchive: DependencyBlocked,
-			wantNext: "resolve-review", wantReason: "portable review chain bundle",
+			wantGate: reviewtransaction.GateAllow, wantArchive: DependencyReady, wantNext: "archive",
 		},
 		{
-			name: "missing ledger invalidates archive",
+			name: "missing ledger mirror preserves native authority",
 			mutate: func(t *testing.T, changeRoot string, _ reviewtransaction.Receipt, _ reviewtransaction.GateRequest) {
 				if err := os.Remove(filepath.Join(changeRoot, "reviews", "ledger.json")); err != nil {
 					t.Fatal(err)
 				}
 			},
-			wantGate: reviewtransaction.GateInvalidated, wantArchive: DependencyBlocked,
-			wantNext: "resolve-review", wantReason: "ledger",
+			wantGate: reviewtransaction.GateAllow, wantArchive: DependencyReady, wantNext: "archive",
 		},
 		{
-			name: "stale ledger invalidates archive",
+			name: "stale ledger mirror preserves native authority",
 			mutate: func(t *testing.T, changeRoot string, _ reviewtransaction.Receipt, _ reviewtransaction.GateRequest) {
 				write(t, filepath.Join(changeRoot, "reviews", "ledger.json"), "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[{\"id\":\"stale\"}]}")
 			},
-			wantGate: reviewtransaction.GateInvalidated, wantArchive: DependencyBlocked,
-			wantNext: "resolve-review", wantReason: "invalidated",
+			wantGate: reviewtransaction.GateAllow, wantArchive: DependencyReady, wantNext: "archive",
 		},
 		{
-			name: "mismatched transaction invalidates archive",
+			name: "mismatched transaction mirror preserves native authority",
 			mutate: func(t *testing.T, changeRoot string, _ reviewtransaction.Receipt, _ reviewtransaction.GateRequest) {
 				var transaction reviewtransaction.Transaction
 				path := filepath.Join(changeRoot, "reviews", "transaction.json")
@@ -86,8 +99,7 @@ func TestResolveArchiveRequiresApprovedExactReviewReceipt(t *testing.T) {
 				transaction.LineageID = "different-lineage"
 				writeJSON(t, path, transaction)
 			},
-			wantGate: reviewtransaction.GateInvalidated, wantArchive: DependencyBlocked,
-			wantNext: "resolve-review", wantReason: "persisted",
+			wantGate: reviewtransaction.GateAllow, wantArchive: DependencyReady, wantNext: "archive",
 		},
 		{
 			name: "pending receipt invalidates archive",
@@ -111,13 +123,12 @@ func TestResolveArchiveRequiresApprovedExactReviewReceipt(t *testing.T) {
 			wantNext: "resolve-review", wantReason: "explicit new lineage",
 		},
 		{
-			name: "new failing external evidence escalates without review",
+			name: "stale gate context cannot override native authority",
 			mutate: func(t *testing.T, changeRoot string, _ reviewtransaction.Receipt, request reviewtransaction.GateRequest) {
 				request.ExternalEvidence = reviewtransaction.ExternalEvidenceEscalating
 				writeJSON(t, filepath.Join(changeRoot, "reviews", "gate-context.json"), request)
 			},
-			wantGate: reviewtransaction.GateEscalated, wantArchive: DependencyBlocked,
-			wantNext: "resolve-review", wantReason: "external evidence",
+			wantGate: reviewtransaction.GateAllow, wantArchive: DependencyReady, wantNext: "archive",
 		},
 	}
 
@@ -149,6 +160,56 @@ func TestResolveArchiveRequiresApprovedExactReviewReceipt(t *testing.T) {
 				t.Fatalf("BlockedReasons = %v, want containing %q", status.BlockedReasons, tt.wantReason)
 			}
 		})
+	}
+}
+
+func TestNativeReceiptDiscoveryDefersChangedScopeToOneNativeGateEvaluation(t *testing.T) {
+	root := t.TempDir()
+	changeRoot := seedBoundedReadyChange(t, root)
+	writeApprovedReviewArtifacts(t, changeRoot)
+	if err := os.Remove(filepath.Join(changeRoot, "reviews", "receipt.json")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(changeRoot, "tasks.md"), "- [x] 1.1 Work\n- [x] changed after review\n")
+	original := evaluateNativeReviewGate
+	count := 0
+	evaluateNativeReviewGate = func(ctx context.Context, repo string, receipt reviewtransaction.Receipt, request reviewtransaction.GateRequest) reviewtransaction.NativeGateEvaluation {
+		count++
+		return reviewtransaction.EvaluateNativeGate(ctx, repo, receipt, request)
+	}
+	t.Cleanup(func() { evaluateNativeReviewGate = original })
+
+	status, err := Resolve(ResolveOptions{CWD: root, ChangeName: "thin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || status.ReviewGate == nil || status.ReviewGate.Result != reviewtransaction.GateScopeChanged {
+		t.Fatalf("native evaluations=%d gate=%#v, want one scope-changed evaluation", count, status.ReviewGate)
+	}
+}
+
+func TestNativeReceiptDiscoveryRejectsMultipleTerminalLineagesAsAmbiguous(t *testing.T) {
+	root := t.TempDir()
+	changeRoot := seedBoundedReadyChange(t, root)
+	writeApprovedReviewArtifacts(t, changeRoot)
+	if err := os.Remove(filepath.Join(changeRoot, "reviews", "receipt.json")); err != nil {
+		t.Fatal(err)
+	}
+	writeAdditionalApprovedNativeReceipt(t, root, "second-lineage")
+	original := evaluateNativeReviewGate
+	count := 0
+	evaluateNativeReviewGate = func(ctx context.Context, repo string, receipt reviewtransaction.Receipt, request reviewtransaction.GateRequest) reviewtransaction.NativeGateEvaluation {
+		count++
+		return reviewtransaction.EvaluateNativeGate(ctx, repo, receipt, request)
+	}
+	t.Cleanup(func() { evaluateNativeReviewGate = original })
+
+	status, err := Resolve(ResolveOptions{CWD: root, ChangeName: "thin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || status.ReviewGate == nil || status.ReviewGate.Result != reviewtransaction.GateInvalidated || !strings.Contains(status.ReviewGate.Reason, "restore the change-local reviews/receipt.json mirror") {
+		t.Fatalf("native evaluations=%d gate=%#v, want ambiguous discovery before evaluation", count, status.ReviewGate)
 	}
 }
 
@@ -243,7 +304,7 @@ func TestResolveEngramArchiveRecoversRetainedPolicyWithoutSourceArtifacts(t *tes
 	}
 }
 
-func TestResolveEngramArchiveRejectsTamperedRetainedPolicy(t *testing.T) {
+func TestResolveEngramArchiveIgnoresNonAuthoritativeRetainedPolicy(t *testing.T) {
 	root := t.TempDir()
 	changeRoot := seedBoundedReadyChange(t, root)
 	writeApprovedReviewArtifacts(t, changeRoot)
@@ -267,7 +328,7 @@ func TestResolveEngramArchiveRejectsTamperedRetainedPolicy(t *testing.T) {
 	if !ok {
 		t.Fatal("resolveEngramStatus() did not retain the Engram change")
 	}
-	if status.ReviewGate == nil || status.ReviewGate.Result != reviewtransaction.GateInvalidated || status.Dependencies.Archive != DependencyBlocked {
+	if status.ReviewGate == nil || status.ReviewGate.Result != reviewtransaction.GateAllow || status.Dependencies.Archive != DependencyReady {
 		t.Fatalf("tampered Engram policy status = gate=%#v archive=%q", status.ReviewGate, status.Dependencies.Archive)
 	}
 }
@@ -322,13 +383,15 @@ func TestResolveStartsBoundedReviewBeforeFinalVerification(t *testing.T) {
 		t.Fatalf("without transaction verify=%q next=%q, want blocked/review", status.Dependencies.Verify, status.NextRecommended)
 	}
 	dispatcher := RenderDispatcherMarkdown(status)
-	for _, want := range []string{"### Next Review Operation", "gentle-ai review-start", "--intended-untracked-manifest", "reconcile-terminal-mirrors", "review-validate"} {
+	for _, want := range []string{"### Next Review Operation", "gentle-ai review start", "gentle-ai review finalize", "gentle-ai review validate --gate post-apply", "reconcile existing terminal mirrors"} {
 		if !strings.Contains(dispatcher, want) {
 			t.Fatalf("dispatcher missing %q:\n%s", want, dispatcher)
 		}
 	}
-	if strings.Contains(dispatcher, "--machine-transaction-out") {
-		t.Fatalf("dispatcher routes a mirror write before the authoritative append:\n%s", dispatcher)
+	for _, forbidden := range []string{"review-start", "review-step", "review-resume", "review-validate", "review-bundle-export", "--machine-transaction-out", "--intended-untracked-manifest"} {
+		if strings.Contains(dispatcher, forbidden) {
+			t.Fatalf("dispatcher exposes lower-level review command %q:\n%s", forbidden, dispatcher)
+		}
 	}
 
 	tx, err := reviewtransaction.NewTransaction(reviewtransaction.Start{
@@ -507,10 +570,144 @@ func writeApprovedReviewArtifacts(t *testing.T, changeRoot string) {
 	}
 	writeJSON(t, filepath.Join(reviewsDir, "transaction.json"), tx)
 	writeJSON(t, filepath.Join(reviewsDir, "receipt.json"), receipt)
+	if err := reviewtransaction.WriteReceiptAtomic(filepath.Join(store.Dir, "artifacts", "receipt.json"), receipt); err != nil {
+		t.Fatal(err)
+	}
 	if err := reviewtransaction.WriteChainBundleAtomic(filepath.Join(reviewsDir, "chain-bundle.json"), bundle); err != nil {
 		t.Fatal(err)
 	}
 	writeJSON(t, filepath.Join(reviewsDir, "gate-context.json"), request)
+}
+
+func writeAdditionalApprovedNativeReceipt(t *testing.T, repo, lineage string) {
+	t.Helper()
+	sourceStore, err := reviewtransaction.AuthoritativeStore(context.Background(), repo, "thin-lineage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, _, err := sourceStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := reviewtransaction.NewTransaction(reviewtransaction.Start{
+		LineageID: lineage, Mode: source.Transaction.Mode, Generation: source.Transaction.Generation,
+		Snapshot: source.Transaction.Snapshot, PolicyHash: source.Transaction.PolicyHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := reviewtransaction.AuthoritativeStore(context.Background(), repo, lineage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.StartReview(); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := store.Append("", reviewtransaction.Record{Operation: "review/start", Transaction: *tx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := reviewtransaction.CanonicalLedger([]reviewtransaction.Finding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.FreezeFindings([]reviewtransaction.Finding{}, ledger, source.Transaction.LedgerHash); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Append(revision, reviewtransaction.Record{Operation: "review/freeze-findings", Transaction: *tx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ClassifyEvidence([]reviewtransaction.FindingEvidence{}); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Append(revision, reviewtransaction.Record{Operation: "review/classify", Transaction: *tx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.BeginFinalVerification(); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Append(revision, reviewtransaction.Record{Operation: "review/begin-final-verification", Transaction: *tx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.CompleteFinalVerification(source.Transaction.EvidenceHash, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(revision, reviewtransaction.Record{Operation: "review/complete-final-verification", Transaction: *tx}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := tx.Receipt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reviewtransaction.WriteReceiptAtomic(filepath.Join(store.Dir, "artifacts", "receipt.json"), receipt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyReviewGateDiscoversCompactStateAndReceiptWithoutMirrors(t *testing.T) {
+	repo := t.TempDir()
+	runSDDStatusGit(t, repo, "init", "-q")
+	runSDDStatusGit(t, repo, "config", "user.email", "test@example.com")
+	runSDDStatusGit(t, repo, "config", "user.name", "Test")
+	write(t, filepath.Join(repo, "tracked.txt"), "base\n")
+	runSDDStatusGit(t, repo, "add", "tracked.txt")
+	runSDDStatusGit(t, repo, "commit", "-qm", "base")
+	write(t, filepath.Join(repo, "tracked.txt"), "candidate\n")
+	snapshot, err := (reviewtransaction.SnapshotBuilder{Repo: repo}).Build(context.Background(), reviewtransaction.Target{Kind: reviewtransaction.TargetCurrentChanges, IntendedUntracked: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	risk, lines, err := (reviewtransaction.SnapshotBuilder{Repo: repo}).ClassifySnapshotRisk(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lenses := []string{}
+	if risk == reviewtransaction.RiskMedium {
+		lenses = []string{reviewtransaction.LensReliability}
+	} else if risk == reviewtransaction.RiskHigh {
+		lenses = []string{reviewtransaction.LensRisk, reviewtransaction.LensResilience, reviewtransaction.LensReadability, reviewtransaction.LensReliability}
+	}
+	state, err := reviewtransaction.NewCompactState(reviewtransaction.Start{
+		LineageID: "compact-sdd", Mode: reviewtransaction.ModeOrdinaryBounded, Generation: 1,
+		Snapshot: snapshot, PolicyHash: shaID("1"), RiskLevel: risk, SelectedLenses: lenses, OriginalChangedLines: &lines,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, _ := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, state.LineageID)
+	revision, err := store.Replace("", "review/start", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make([]reviewtransaction.LensResult, len(lenses))
+	for index, lens := range lenses {
+		results[index] = reviewtransaction.LensResult{Lens: lens, Findings: []reviewtransaction.Finding{}, Evidence: []string{"independent causal review completed"}}
+	}
+	if err := state.CompleteReview(reviewtransaction.CompactReviewInput{LensResults: results, Classifications: []reviewtransaction.FindingEvidence{}, RefuterOutcomes: []reviewtransaction.EvidenceResult{}}); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Replace(revision, "review/complete-review", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteVerification([]byte("independent SDD specification and runtime verification passed\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Replace(revision, "review/complete-verification", state); err != nil {
+		t.Fatal(err)
+	}
+	receipt, _ := state.Receipt()
+	if err := reviewtransaction.WriteCompactReceiptAtomic(store.ReceiptPath(), receipt); err != nil {
+		t.Fatal(err)
+	}
+	status := Status{Dependencies: Dependencies{Verify: DependencyAllDone, Archive: DependencyReady}, TaskProgress: TaskProgress{AllComplete: true}}
+	applyReviewGate(&status, repo, "", "")
+	if status.ReviewGate == nil || status.ReviewGate.Result != reviewtransaction.GateAllow || status.Dependencies.Archive != DependencyReady {
+		t.Fatalf("compact SDD gate = %#v", status)
+	}
 }
 
 func boundedVerifyEnvelope(revision, verdict string) string {
@@ -549,7 +746,7 @@ func remediationTransaction(t *testing.T, revision string, ready bool) reviewtra
 	}
 	_ = tx.StartReview()
 	_ = freezeStatusFindings(tx, []reviewtransaction.Finding{{ID: "R1-001", Severity: "CRITICAL"}})
-	_, _ = tx.ClassifyEvidence([]reviewtransaction.FindingEvidence{{FindingID: "R1-001", Class: reviewtransaction.EvidenceDeterministic, Proof: "failing focused test"}})
+	_, _ = tx.ClassifyEvidence([]reviewtransaction.FindingEvidence{{FindingID: "R1-001", Class: reviewtransaction.EvidenceDeterministic, Causality: reviewtransaction.CausalIntroduced, Proof: "failing focused test"}})
 	if err := tx.BeginFix(revision); err != nil {
 		t.Fatalf("BeginFix() error = %v", err)
 	}

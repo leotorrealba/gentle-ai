@@ -1,0 +1,785 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/gentleman-programming/gentle-ai/internal/reviewtransaction"
+)
+
+const facadeReviewPolicy = `Gentle AI native bounded review policy.
+
+Only candidate-caused BLOCKER or CRITICAL findings may require correction. Pre-existing and base-only findings are follow-ups. One correction is bounded by the frozen original scope, and delivery gates validate the terminal receipt against live Git evidence.
+`
+
+type ReviewFacadeStartResult struct {
+	Operation        string                      `json:"operation"`
+	LineageID        string                      `json:"lineage_id"`
+	State            reviewtransaction.State     `json:"state"`
+	RiskLevel        reviewtransaction.RiskLevel `json:"risk_level"`
+	SelectedLenses   []string                    `json:"selected_lenses"`
+	ChangedFiles     int                         `json:"changed_files"`
+	ChangedLines     int                         `json:"changed_lines"`
+	CorrectionBudget int                         `json:"correction_budget"`
+}
+
+type ReviewFacadeFinalizeResult struct {
+	Operation     string                  `json:"operation"`
+	LineageID     string                  `json:"lineage_id"`
+	State         reviewtransaction.State `json:"state"`
+	Action        string                  `json:"action"`
+	StoreRevision string                  `json:"store_revision"`
+	ReceiptPath   string                  `json:"receipt_path,omitempty"`
+}
+
+type facadeFinding struct {
+	ID                string                              `json:"id,omitempty"`
+	Lens              string                              `json:"lens,omitempty"`
+	Location          string                              `json:"location,omitempty"`
+	Severity          string                              `json:"severity,omitempty"`
+	Claim             string                              `json:"claim,omitempty"`
+	ProofRefs         []string                            `json:"proof_refs,omitempty"`
+	EvidenceClass     reviewtransaction.EvidenceClass     `json:"evidence_class,omitempty"`
+	CausalDisposition reviewtransaction.CausalDisposition `json:"causal_disposition,omitempty"`
+}
+
+type facadeReviewerResult struct {
+	Lens     string          `json:"lens,omitempty"`
+	Findings []facadeFinding `json:"findings"`
+	Evidence []string        `json:"evidence"`
+}
+
+type facadeValidationCheck struct {
+	Passed   bool     `json:"passed"`
+	Evidence []string `json:"evidence"`
+}
+
+type facadeValidationResult struct {
+	OriginalCriteria     facadeValidationCheck        `json:"original_criteria"`
+	CorrectionRegression facadeValidationCheck        `json:"correction_regression"`
+	FollowUps            []reviewtransaction.FollowUp `json:"follow_ups"`
+}
+
+type facadeRefuterResult struct {
+	Results []facadeRefuterOutcome `json:"results"`
+}
+
+type facadeRefuterOutcome struct {
+	FindingID string                            `json:"finding_id"`
+	Outcome   reviewtransaction.EvidenceOutcome `json:"outcome"`
+	ProofRefs []string                          `json:"proof_refs"`
+}
+
+type facadeArtifacts struct {
+	policy, ledger, evidence, fixDelta, receipt string
+}
+
+func RunReview(args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		_, _ = fmt.Fprintln(stdout, "Usage: gentle-ai review <start|finalize|validate> [flags]\n\nOrdinary review facade; repository scope, authority, canonical artifacts, and lifecycle transitions are derived by Go.")
+		return nil
+	}
+	switch args[0] {
+	case "start":
+		return RunReviewFacadeStart(args[1:], stdout)
+	case "finalize":
+		return RunReviewFacadeFinalize(args[1:], stdout)
+	case "validate":
+		return RunReviewFacadeValidate(args[1:], stdout)
+	default:
+		return fmt.Errorf("unknown review command %q", args[0])
+	}
+}
+
+func RunReviewFacadeStart(args []string, stdout io.Writer) error {
+	flags := newReviewFlagSet("review start", stdout, "Freeze live Git scope and derive the bounded review tier, lenses, and correction budget.")
+	cwd := flags.String("cwd", ".", "repository path")
+	lineage := flags.String("lineage", "", "optional explicit review lineage identifier")
+	policySource := flags.String("policy", "", "optional review policy file; the native bounded policy is used by default")
+	focus := flags.String("focus", "reliability", "dominant standard-risk focus: risk, resilience, readability, or reliability")
+	tracePath := flags.String("trace", "", "optional diagnostic operation metadata trace path")
+	if err := parseReviewFlags(flags, args); err != nil {
+		return err
+	}
+	if reviewHelpRequested(args) {
+		return nil
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected review start argument %q", flags.Arg(0))
+	}
+	builder := reviewtransaction.SnapshotBuilder{Repo: *cwd}
+	root, err := builder.ResolveRepositoryRoot(context.Background())
+	if err != nil {
+		return fmt.Errorf("resolve review repository root: %w", err)
+	}
+	intended, err := builder.DiscoverIntendedUntracked(context.Background())
+	if err != nil {
+		return fmt.Errorf("discover intended untracked files: %w", err)
+	}
+	snapshot, err := (reviewtransaction.SnapshotBuilder{Repo: root}).Build(context.Background(), reviewtransaction.Target{
+		Kind: reviewtransaction.TargetCurrentChanges, IntendedUntracked: intended,
+	})
+	if err != nil {
+		return fmt.Errorf("build facade review target: %w", err)
+	}
+	risk, changedLines, err := (reviewtransaction.SnapshotBuilder{Repo: root}).ClassifySnapshotRisk(context.Background(), snapshot)
+	if err != nil {
+		return fmt.Errorf("classify facade review target: %w", err)
+	}
+	lenses, err := facadeSelectedLenses(risk, *focus)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*lineage) == "" {
+		*lineage = "review-" + strings.TrimPrefix(snapshot.Identity, "sha256:")[:16]
+	}
+	store, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), root, *lineage)
+	if err != nil {
+		return fmt.Errorf("derive facade review store: %w", err)
+	}
+	store.TracePath = strings.TrimSpace(*tracePath)
+	legacy, err := reviewtransaction.AuthoritativeStore(context.Background(), root, *lineage)
+	if err == nil {
+		if _, loadErr := legacy.LoadChain(); loadErr == nil {
+			return fmt.Errorf("%w: choose a new lineage for compact authority", reviewtransaction.ErrLegacyReadOnly)
+		}
+	}
+	policy, err := facadePolicyBytes(*policySource)
+	if err != nil {
+		return err
+	}
+	state, err := reviewtransaction.NewCompactState(reviewtransaction.Start{
+		LineageID: *lineage, Mode: reviewtransaction.ModeOrdinaryBounded, Generation: 1,
+		Snapshot: snapshot, PolicyHash: facadePayloadHash(policy), RiskLevel: risk,
+		SelectedLenses: lenses, OriginalChangedLines: &changedLines,
+	})
+	if err != nil {
+		return fmt.Errorf("create compact facade review: %w", err)
+	}
+	if _, err := store.Replace("", "review/start", state); err != nil {
+		return fmt.Errorf("persist compact facade review: %w", err)
+	}
+	return encodeReviewJSON(stdout, ReviewFacadeStartResult{
+		Operation: "review/start", LineageID: state.LineageID, State: state.State,
+		RiskLevel: state.RiskLevel, SelectedLenses: state.SelectedLenses,
+		ChangedFiles: len(state.InitialSnapshot.Paths), ChangedLines: changedLines, CorrectionBudget: state.CorrectionBudget,
+	})
+}
+
+func RunReviewFacadeFinalize(args []string, stdout io.Writer) error {
+	flags := newReviewFlagSet("review finalize", stdout, "Canonicalize reviewer output and evidence, perform required native transitions, and materialize the terminal receipt.")
+	cwd := flags.String("cwd", ".", "repository path")
+	lineage := flags.String("lineage", "", "optional lineage override when discovery is ambiguous")
+	validationPath := flags.String("validation", "", "targeted correction validation JSON file or - for stdin")
+	refuterPath := flags.String("refuter", "", "optional refuter outcomes JSON file or - for stdin")
+	evidencePath := flags.String("evidence", "", "final test or verification evidence file or - for stdin")
+	correctionLines := flags.Int("correction-lines", 0, "positive predicted correction changed lines before editing")
+	failed := flags.Bool("failed", false, "bind supplied final evidence as a failed verification")
+	tracePath := flags.String("trace", "", "optional diagnostic operation metadata trace path")
+	var resultPaths repeatedString
+	flags.Var(&resultPaths, "result", "reviewer result JSON file or - for stdin; repeat in selected-lens order")
+	if err := parseReviewFlags(flags, args); err != nil {
+		return err
+	}
+	if reviewHelpRequested(args) {
+		return nil
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected review finalize argument %q", flags.Arg(0))
+	}
+	if countFacadeStdin(resultPaths, *validationPath, *refuterPath, *evidencePath) > 1 {
+		return errors.New("review finalize accepts stdin for only one input")
+	}
+	root, err := (reviewtransaction.SnapshotBuilder{Repo: *cwd}).ResolveRepositoryRoot(context.Background())
+	if err != nil {
+		return fmt.Errorf("resolve review repository root: %w", err)
+	}
+	store, record, err := discoverCompactFacadeReview(context.Background(), root, *lineage, false)
+	if err != nil {
+		if _, _, _, legacyErr := discoverFacadeReview(context.Background(), root, *lineage, false); legacyErr == nil {
+			return reviewtransaction.ErrLegacyReadOnly
+		}
+		return err
+	}
+	store.TracePath = strings.TrimSpace(*tracePath)
+	state := record.State
+	reviewerResults, err := readFacadeReviewerResults(resultPaths)
+	if err != nil {
+		return err
+	}
+	var validation *facadeValidationResult
+	if strings.TrimSpace(*validationPath) != "" {
+		validation = &facadeValidationResult{}
+		if err := readFacadeJSON(*validationPath, validation); err != nil {
+			return fmt.Errorf("read targeted validation: %w", err)
+		}
+	}
+	var refuter facadeRefuterResult
+	if strings.TrimSpace(*refuterPath) != "" {
+		if err := readFacadeJSON(*refuterPath, &refuter); err != nil {
+			return fmt.Errorf("read refuter outcomes: %w", err)
+		}
+	}
+	var evidence []byte
+	if strings.TrimSpace(*evidencePath) != "" {
+		evidence, err = readFacadeBytes(*evidencePath)
+		if err != nil {
+			return fmt.Errorf("read final review evidence: %w", err)
+		}
+	}
+
+	if state.State == reviewtransaction.StateReviewing {
+		input, err := prepareCompactReviewerResults(state, reviewerResults, refuter)
+		if err != nil {
+			return err
+		}
+		if err := state.CompleteReview(input); err != nil {
+			return fmt.Errorf("complete compact review: %w", err)
+		}
+		revision, err := store.Replace(record.Revision, "review/complete-review", state)
+		if err != nil {
+			return err
+		}
+		record.Revision, record.State = revision, state
+	}
+	if state.State == reviewtransaction.StateCorrectionRequired && state.ProposedCorrectionLines == nil && *correctionLines > 0 {
+		if err := state.BeginCorrection(*correctionLines); err != nil {
+			return fmt.Errorf("begin bounded compact correction: %w", err)
+		}
+		revision, err := store.Replace(record.Revision, "review/begin-fix", state)
+		if err != nil {
+			return err
+		}
+		record.Revision, record.State = revision, state
+	}
+	if state.State == reviewtransaction.StateCorrectionRequired && state.ProposedCorrectionLines == nil {
+		return encodeCompactFacadeFinalize(stdout, state, record.Revision, store, "rerun with --correction-lines before editing")
+	}
+	if state.State == reviewtransaction.StateCorrectionRequired {
+		if validation == nil {
+			return encodeCompactFacadeFinalize(stdout, state, record.Revision, store, "apply the bounded correction, then rerun with --validation and --evidence")
+		}
+		fixSnapshot, err := (reviewtransaction.SnapshotBuilder{Repo: root}).Build(context.Background(), reviewtransaction.Target{
+			Kind: reviewtransaction.TargetFixDiff, BaseRef: state.CurrentSnapshot.CandidateTree,
+			IntendedUntracked: state.InitialSnapshot.IntendedUntracked, LedgerIDs: state.FixFindingIDs,
+		})
+		if err != nil {
+			return fmt.Errorf("derive facade correction snapshot: %w", err)
+		}
+		actual, err := (reviewtransaction.SnapshotBuilder{Repo: root}).ChangedLines(context.Background(), fixSnapshot)
+		if err != nil {
+			return fmt.Errorf("derive facade correction size: %w", err)
+		}
+		nativeValidation, err := validation.compact(reviewtransaction.FixDeltaHashForSnapshot(fixSnapshot), state.FixFindingIDs)
+		if err != nil {
+			return err
+		}
+		if err := state.CompleteCorrection(fixSnapshot, actual, nativeValidation); err != nil {
+			return fmt.Errorf("complete compact correction: %w", err)
+		}
+		revision, err := store.Replace(record.Revision, "review/complete-fix", state)
+		if err != nil {
+			return err
+		}
+		record.Revision, record.State = revision, state
+	}
+	if state.State == reviewtransaction.StateValidating {
+		if len(evidence) == 0 {
+			return encodeCompactFacadeFinalize(stdout, state, record.Revision, store, "rerun with --evidence")
+		}
+		if err := state.CompleteVerification(evidence, !*failed); err != nil {
+			return fmt.Errorf("complete compact final verification: %w", err)
+		}
+		revision, err := store.Replace(record.Revision, "review/complete-verification", state)
+		if err != nil {
+			return err
+		}
+		record.Revision, record.State = revision, state
+	}
+	if state.State != reviewtransaction.StateApproved && state.State != reviewtransaction.StateEscalated {
+		return encodeCompactFacadeFinalize(stdout, state, record.Revision, store, "continue the current review state")
+	}
+	receipt, err := state.Receipt()
+	if err != nil {
+		return err
+	}
+	if err := reviewtransaction.WriteCompactReceiptAtomic(store.ReceiptPath(), receipt); err != nil {
+		return fmt.Errorf("write compact review receipt: %w", err)
+	}
+	return encodeCompactFacadeFinalize(stdout, state, record.Revision, store, "validate delivery with gentle-ai review validate --gate <gate>")
+}
+
+func RunReviewFacadeValidate(args []string, stdout io.Writer) error {
+	flags := newReviewFlagSet("review validate", stdout, "Auto-discover authoritative review state and receipt, then validate them against live Git evidence.")
+	cwd := flags.String("cwd", ".", "repository path")
+	lineage := flags.String("lineage", "", "optional lineage override when discovery is ambiguous")
+	gate := flags.String("gate", "", "lifecycle gate: post-apply, pre-commit, pre-push, pre-pr, or release")
+	baseRef := flags.String("base-ref", "", "optional expected remote publication base for pre-pr")
+	ciAttestation := flags.String("pre-pr-ci-attestation", "", "signed exact-merged-tree CI attestation for a compatible base advance")
+	policy := flags.String("policy", "", "explicit custom policy containing compatible-base CI trust")
+	releaseConfiguration := flags.String("release-configuration", "", "release configuration artifact")
+	releaseGenerated := flags.String("release-generated", "", "generated artifact manifest")
+	releaseProvenance := flags.String("release-provenance", "", "release provenance artifact")
+	releaseBoundary := flags.String("release-publication-boundary", "", "sealed publication boundary artifact")
+	releaseFreshness := flags.String("release-evidence-freshness", "", "current release evidence freshness artifact")
+	if err := parseReviewFlags(flags, args); err != nil {
+		return err
+	}
+	if reviewHelpRequested(args) {
+		return nil
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected review validate argument %q", flags.Arg(0))
+	}
+	if strings.TrimSpace(*gate) == "" {
+		return errors.New("review validate requires --gate")
+	}
+	root, err := (reviewtransaction.SnapshotBuilder{Repo: *cwd}).ResolveRepositoryRoot(context.Background())
+	if err != nil {
+		return fmt.Errorf("resolve review repository root: %w", err)
+	}
+	compactStore, compactRecord, compactErr := discoverCompactFacadeReview(context.Background(), root, *lineage, true)
+	if compactErr == nil {
+		if _, _, _, legacyErr := discoverFacadeReview(context.Background(), root, *lineage, true); legacyErr == nil {
+			return errors.New("review authority is ambiguous across compact v2 and legacy v1 stores; specify and clean up the intended lineage")
+		}
+		payload, err := os.ReadFile(compactStore.ReceiptPath())
+		if err != nil {
+			return errors.New("facade review receipt is not available")
+		}
+		receipt, err := reviewtransaction.ParseCompactReceipt(payload)
+		if err != nil {
+			return fmt.Errorf("parse compact review receipt: %w", err)
+		}
+		input := reviewtransaction.NativeGateRequestInput{
+			Gate: reviewtransaction.GateKind(*gate), LineageID: compactRecord.State.LineageID,
+			IntendedUntracked: append([]string(nil), compactRecord.State.InitialSnapshot.IntendedUntracked...),
+			BaseRef:           *baseRef, PrePRCIAttestation: *ciAttestation,
+			ReleaseConfiguration: *releaseConfiguration, ReleaseGenerated: *releaseGenerated,
+			ReleaseProvenance: *releaseProvenance, ReleasePublicationBoundary: *releaseBoundary,
+			ReleaseEvidenceFreshness: *releaseFreshness,
+		}
+		if strings.TrimSpace(*ciAttestation) != "" {
+			input.PolicyArtifact = *policy
+		}
+		evaluation := reviewtransaction.EvaluateCompactGate(context.Background(), root, receipt, input)
+		return emitFacadeGateEvaluation(stdout, evaluation)
+	}
+
+	_, chain, artifacts, legacyErr := discoverFacadeReview(context.Background(), root, *lineage, true)
+	if legacyErr != nil {
+		return compactErr
+	}
+	tx := chain.Records[len(chain.Records)-1].Transaction
+	validateArgs := []string{"--cwd", root, "--receipt", artifacts.receipt, "--lineage", tx.LineageID, "--gate", *gate}
+	if strings.TrimSpace(*baseRef) != "" {
+		validateArgs = append(validateArgs, "--base-ref", *baseRef)
+	}
+	if strings.TrimSpace(*ciAttestation) != "" {
+		validateArgs = append(validateArgs, "--pre-pr-ci-attestation", *ciAttestation)
+		if _, err := os.Stat(artifacts.policy); err == nil {
+			validateArgs = append(validateArgs, "--policy", artifacts.policy)
+		}
+	}
+	for _, item := range [][2]string{{"--release-configuration", *releaseConfiguration}, {"--release-generated", *releaseGenerated}, {"--release-provenance", *releaseProvenance}, {"--release-publication-boundary", *releaseBoundary}, {"--release-evidence-freshness", *releaseFreshness}} {
+		if strings.TrimSpace(item[1]) != "" {
+			validateArgs = append(validateArgs, item[0], item[1])
+		}
+	}
+	for _, path := range tx.Snapshot.IntendedUntracked {
+		validateArgs = append(validateArgs, "--intended-untracked", path)
+	}
+	return RunReviewValidate(validateArgs, stdout)
+}
+
+func facadeSelectedLenses(risk reviewtransaction.RiskLevel, focus string) ([]string, error) {
+	switch risk {
+	case reviewtransaction.RiskLow:
+		return []string{}, nil
+	case reviewtransaction.RiskHigh:
+		return []string{reviewtransaction.LensRisk, reviewtransaction.LensResilience, reviewtransaction.LensReadability, reviewtransaction.LensReliability}, nil
+	case reviewtransaction.RiskMedium:
+		lens, ok := map[string]string{
+			"risk": reviewtransaction.LensRisk, "resilience": reviewtransaction.LensResilience,
+			"readability": reviewtransaction.LensReadability, "reliability": reviewtransaction.LensReliability,
+		}[strings.TrimSpace(focus)]
+		if !ok {
+			return nil, fmt.Errorf("unsupported review focus %q", focus)
+		}
+		return []string{lens}, nil
+	default:
+		return nil, fmt.Errorf("unsupported review risk %q", risk)
+	}
+}
+
+func (result facadeReviewerResult) nativeLensResult() (reviewtransaction.LensResult, []facadeFinding) {
+	findings := make([]reviewtransaction.Finding, len(result.Findings))
+	for index, finding := range result.Findings {
+		findings[index] = reviewtransaction.Finding{
+			ID: finding.ID, Lens: finding.Lens, Location: finding.Location, Severity: finding.Severity,
+			Claim: finding.Claim, ProofRefs: append([]string(nil), finding.ProofRefs...),
+		}
+	}
+	return reviewtransaction.LensResult{Lens: result.Lens, Findings: findings, Evidence: result.Evidence}, result.Findings
+}
+
+func (result facadeValidationResult) native(tx reviewtransaction.Transaction) (reviewtransaction.ScopedValidationResult, error) {
+	if len(result.OriginalCriteria.Evidence) == 0 || len(result.CorrectionRegression.Evidence) == 0 {
+		return reviewtransaction.ScopedValidationResult{}, errors.New("targeted validation requires original_criteria and correction_regression evidence")
+	}
+	if result.FollowUps == nil {
+		result.FollowUps = []reviewtransaction.FollowUp{}
+	}
+	return reviewtransaction.ScopedValidationResult{
+		LedgerIDs: tx.FixFindingIDs, FixCausedFindings: []reviewtransaction.Finding{}, FollowUps: result.FollowUps,
+		OriginalCriteria: reviewtransaction.ValidationCheck{
+			EvidenceHash: facadeValueHash("original-criteria", result.OriginalCriteria), FixDeltaHash: tx.FixDeltaHash, Passed: result.OriginalCriteria.Passed,
+		},
+		CorrectionRegression: reviewtransaction.ValidationCheck{
+			EvidenceHash: facadeValueHash("correction-regression", result.CorrectionRegression), FixDeltaHash: tx.FixDeltaHash, Passed: result.CorrectionRegression.Passed,
+		},
+	}, nil
+}
+
+func (result facadeValidationResult) compact(fixDeltaHash string, findingIDs []string) (reviewtransaction.ScopedValidationResult, error) {
+	if len(result.OriginalCriteria.Evidence) == 0 || len(result.CorrectionRegression.Evidence) == 0 {
+		return reviewtransaction.ScopedValidationResult{}, errors.New("targeted validation requires original_criteria and correction_regression evidence")
+	}
+	if result.FollowUps == nil {
+		result.FollowUps = []reviewtransaction.FollowUp{}
+	}
+	return reviewtransaction.ScopedValidationResult{
+		LedgerIDs: append([]string(nil), findingIDs...), FixCausedFindings: []reviewtransaction.Finding{}, FollowUps: result.FollowUps,
+		OriginalCriteria: reviewtransaction.ValidationCheck{
+			EvidenceHash: facadeValueHash("original-criteria", result.OriginalCriteria), FixDeltaHash: fixDeltaHash, Passed: result.OriginalCriteria.Passed,
+		},
+		CorrectionRegression: reviewtransaction.ValidationCheck{
+			EvidenceHash: facadeValueHash("correction-regression", result.CorrectionRegression), FixDeltaHash: fixDeltaHash, Passed: result.CorrectionRegression.Passed,
+		},
+	}, nil
+}
+
+func (result facadeRefuterResult) native() []reviewtransaction.EvidenceResult {
+	outcomes := make([]reviewtransaction.EvidenceResult, len(result.Results))
+	for index, item := range result.Results {
+		outcomes[index] = reviewtransaction.EvidenceResult{
+			FindingID: item.FindingID, Outcome: item.Outcome, Proof: strings.Join(item.ProofRefs, "; "),
+		}
+	}
+	return outcomes
+}
+
+func prepareCompactReviewerResults(state reviewtransaction.CompactState, results []facadeReviewerResult, refuter facadeRefuterResult) (reviewtransaction.CompactReviewInput, error) {
+	if len(results) != len(state.SelectedLenses) {
+		return reviewtransaction.CompactReviewInput{}, fmt.Errorf("review finalize requires all %d original reviewer result(s)", len(state.SelectedLenses))
+	}
+	lensResults := make([]reviewtransaction.LensResult, len(results))
+	classifications := make([]reviewtransaction.FindingEvidence, 0)
+	for index, reviewer := range results {
+		lensResult, rawFindings := reviewer.nativeLensResult()
+		lensResult.Lens = state.SelectedLenses[index]
+		canonical, err := reviewtransaction.CanonicalLensResult(lensResult)
+		if err != nil {
+			return reviewtransaction.CompactReviewInput{}, fmt.Errorf("canonicalize reviewer result %d: %w", index+1, err)
+		}
+		lensResults[index] = canonical
+		for findingIndex, finding := range canonical.Findings {
+			if !facadeSevere(finding.Severity) {
+				continue
+			}
+			raw := rawFindings[findingIndex]
+			classifications = append(classifications, reviewtransaction.FindingEvidence{
+				FindingID: finding.ID, Class: raw.EvidenceClass, Causality: raw.CausalDisposition,
+				Proof: strings.Join(raw.ProofRefs, "; "),
+			})
+		}
+	}
+	return reviewtransaction.CompactReviewInput{
+		LensResults: lensResults, Classifications: classifications, RefuterOutcomes: refuter.native(),
+	}, nil
+}
+
+func discoverCompactFacadeReview(ctx context.Context, repo, lineage string, terminal bool) (reviewtransaction.CompactStore, reviewtransaction.CompactRecord, error) {
+	if strings.TrimSpace(lineage) != "" {
+		store, err := reviewtransaction.CompactAuthoritativeStore(ctx, repo, lineage)
+		if err != nil {
+			return reviewtransaction.CompactStore{}, reviewtransaction.CompactRecord{}, err
+		}
+		record, err := store.Load()
+		if err != nil {
+			legacy, legacyErr := reviewtransaction.AuthoritativeStore(ctx, repo, lineage)
+			if legacyErr == nil {
+				if _, loadErr := legacy.LoadChain(); loadErr == nil {
+					return reviewtransaction.CompactStore{}, reviewtransaction.CompactRecord{}, reviewtransaction.ErrLegacyReadOnly
+				}
+			}
+			return reviewtransaction.CompactStore{}, reviewtransaction.CompactRecord{}, fmt.Errorf("load compact facade review lineage: %w", err)
+		}
+		if terminal {
+			if _, err := os.Stat(store.ReceiptPath()); err != nil {
+				return reviewtransaction.CompactStore{}, reviewtransaction.CompactRecord{}, errors.New("facade review receipt is not available")
+			}
+		}
+		return store, record, nil
+	}
+	stores, err := reviewtransaction.DiscoverCompactStores(ctx, repo)
+	if err != nil {
+		return reviewtransaction.CompactStore{}, reviewtransaction.CompactRecord{}, err
+	}
+	type candidate struct {
+		store  reviewtransaction.CompactStore
+		record reviewtransaction.CompactRecord
+	}
+	candidates := []candidate{}
+	for _, store := range stores {
+		record, loadErr := store.Load()
+		if loadErr != nil {
+			continue
+		}
+		isTerminal := record.State.State == reviewtransaction.StateApproved || record.State.State == reviewtransaction.StateEscalated
+		if terminal {
+			if !isTerminal {
+				continue
+			}
+			if _, statErr := os.Stat(store.ReceiptPath()); statErr != nil {
+				continue
+			}
+		}
+		candidates = append(candidates, candidate{store: store, record: record})
+	}
+	if !terminal && len(candidates) > 1 {
+		active := candidates[:0]
+		for _, candidate := range candidates {
+			if candidate.record.State.State != reviewtransaction.StateApproved && candidate.record.State.State != reviewtransaction.StateEscalated {
+				active = append(active, candidate)
+			}
+		}
+		if len(active) > 0 {
+			candidates = active
+		}
+	}
+	if len(candidates) > 1 {
+		matching := candidates[:0]
+		for _, candidate := range candidates {
+			snapshot, buildErr := (reviewtransaction.SnapshotBuilder{Repo: repo}).Build(ctx, reviewtransaction.Target{
+				Kind: reviewtransaction.TargetCurrentChanges, IntendedUntracked: candidate.record.State.InitialSnapshot.IntendedUntracked,
+			})
+			if buildErr == nil && snapshot.CandidateTree == candidate.record.State.CurrentSnapshot.CandidateTree {
+				matching = append(matching, candidate)
+			}
+		}
+		if len(matching) > 0 {
+			candidates = matching
+		}
+	}
+	if len(candidates) == 0 {
+		return reviewtransaction.CompactStore{}, reviewtransaction.CompactRecord{}, errors.New("no discoverable compact facade review lineage found")
+	}
+	if len(candidates) != 1 {
+		return reviewtransaction.CompactStore{}, reviewtransaction.CompactRecord{}, errors.New("multiple compact facade review lineages found; specify --lineage")
+	}
+	return candidates[0].store, candidates[0].record, nil
+}
+
+func discoverFacadeReview(ctx context.Context, repo, lineage string, terminal bool) (reviewtransaction.Store, reviewtransaction.ValidatedChain, facadeArtifacts, error) {
+	if strings.TrimSpace(lineage) != "" {
+		store, err := reviewtransaction.AuthoritativeStore(ctx, repo, lineage)
+		if err != nil {
+			return reviewtransaction.Store{}, reviewtransaction.ValidatedChain{}, facadeArtifacts{}, err
+		}
+		chain, err := store.LoadChain()
+		if err != nil {
+			return reviewtransaction.Store{}, reviewtransaction.ValidatedChain{}, facadeArtifacts{}, fmt.Errorf("load facade review lineage: %w", err)
+		}
+		artifacts := facadeArtifactPaths(store)
+		if terminal {
+			if _, err := os.Stat(artifacts.receipt); err != nil {
+				return reviewtransaction.Store{}, reviewtransaction.ValidatedChain{}, facadeArtifacts{}, errors.New("facade review receipt is not available")
+			}
+		}
+		return store, chain, artifacts, nil
+	}
+	stores, err := reviewtransaction.DiscoverAuthoritativeStores(ctx, repo)
+	if err != nil {
+		return reviewtransaction.Store{}, reviewtransaction.ValidatedChain{}, facadeArtifacts{}, fmt.Errorf("discover authoritative review stores: %w", err)
+	}
+	type candidate struct {
+		store     reviewtransaction.Store
+		chain     reviewtransaction.ValidatedChain
+		artifacts facadeArtifacts
+	}
+	candidates := []candidate{}
+	for _, store := range stores {
+		artifacts := facadeArtifactPaths(store)
+		if terminal {
+			if _, err := os.Stat(artifacts.receipt); err != nil {
+				continue
+			}
+		}
+		chain, err := store.LoadChain()
+		if err != nil {
+			continue
+		}
+		tx := chain.Records[len(chain.Records)-1].Transaction
+		isTerminal := tx.State == reviewtransaction.StateApproved || tx.State == reviewtransaction.StateEscalated
+		if terminal && !isTerminal {
+			continue
+		}
+		candidates = append(candidates, candidate{store: store, chain: chain, artifacts: artifacts})
+	}
+	if len(candidates) == 0 {
+		return reviewtransaction.Store{}, reviewtransaction.ValidatedChain{}, facadeArtifacts{}, errors.New("no discoverable facade review lineage found")
+	}
+	if !terminal && len(candidates) > 1 {
+		nonterminal := candidates[:0]
+		for _, candidate := range candidates {
+			tx := candidate.chain.Records[len(candidate.chain.Records)-1].Transaction
+			if tx.State != reviewtransaction.StateApproved && tx.State != reviewtransaction.StateEscalated {
+				nonterminal = append(nonterminal, candidate)
+			}
+		}
+		if len(nonterminal) > 0 {
+			candidates = nonterminal
+		}
+	}
+	if len(candidates) > 1 {
+		matching := candidates[:0]
+		for _, candidate := range candidates {
+			tx := candidate.chain.Records[len(candidate.chain.Records)-1].Transaction
+			snapshot, err := (reviewtransaction.SnapshotBuilder{Repo: repo}).Build(ctx, reviewtransaction.Target{
+				Kind: reviewtransaction.TargetCurrentChanges, IntendedUntracked: tx.Snapshot.IntendedUntracked,
+			})
+			if err == nil && snapshot.CandidateTree == tx.FinalCandidateTree {
+				matching = append(matching, candidate)
+			}
+		}
+		if len(matching) > 0 {
+			candidates = matching
+		}
+	}
+	if len(candidates) != 1 {
+		return reviewtransaction.Store{}, reviewtransaction.ValidatedChain{}, facadeArtifacts{}, errors.New("multiple facade review lineages found; specify --lineage")
+	}
+	selected := candidates[0]
+	return selected.store, selected.chain, selected.artifacts, nil
+}
+
+func facadeArtifactPaths(store reviewtransaction.Store) facadeArtifacts {
+	dir := filepath.Join(store.Dir, "artifacts")
+	return facadeArtifacts{
+		policy: filepath.Join(dir, "policy.md"), ledger: filepath.Join(dir, "ledger.json"),
+		evidence: filepath.Join(dir, "evidence"), fixDelta: filepath.Join(dir, "fix-delta.json"),
+		receipt: filepath.Join(dir, "receipt.json"),
+	}
+}
+
+func encodeCompactFacadeFinalize(stdout io.Writer, state reviewtransaction.CompactState, revision string, store reviewtransaction.CompactStore, action string) error {
+	result := ReviewFacadeFinalizeResult{
+		Operation: "review/finalize", LineageID: state.LineageID, State: state.State, Action: action, StoreRevision: revision,
+	}
+	if state.State == reviewtransaction.StateApproved || state.State == reviewtransaction.StateEscalated {
+		result.ReceiptPath = store.ReceiptPath()
+	}
+	return encodeReviewJSON(stdout, result)
+}
+
+func emitFacadeGateEvaluation(stdout io.Writer, evaluation reviewtransaction.NativeGateEvaluation) error {
+	result := ReviewValidateResult{
+		Schema: ReviewValidateSchema, Result: evaluation.Result, Allowed: evaluation.Result == reviewtransaction.GateAllow,
+		Action: reviewGateAction(evaluation.Result), Reason: evaluation.Reason, Context: evaluation.Context,
+	}
+	if err := encodeReviewJSON(stdout, result); err != nil {
+		return err
+	}
+	if !result.Allowed {
+		return ReviewGateDeniedError{Result: result.Result}
+	}
+	return nil
+}
+
+func facadePolicyBytes(path string) ([]byte, error) {
+	if strings.TrimSpace(path) == "" {
+		return []byte(facadeReviewPolicy), nil
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read facade review policy: %w", err)
+	}
+	return payload, nil
+}
+
+func readFacadeReviewerResults(paths []string) ([]facadeReviewerResult, error) {
+	results := make([]facadeReviewerResult, len(paths))
+	for index, path := range paths {
+		if err := readFacadeJSON(path, &results[index]); err != nil {
+			return nil, fmt.Errorf("read reviewer result %d: %w", index+1, err)
+		}
+		if results[index].Findings == nil || results[index].Evidence == nil {
+			return nil, fmt.Errorf("reviewer result %d requires explicit findings and evidence arrays", index+1)
+		}
+	}
+	return results, nil
+}
+
+func readFacadeJSON(path string, value any) error {
+	payload, err := readFacadeBytes(path)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return errors.New("input contains multiple JSON values")
+	}
+	return nil
+}
+
+func readFacadeBytes(path string) ([]byte, error) {
+	if path == "-" {
+		return io.ReadAll(os.Stdin)
+	}
+	return os.ReadFile(path)
+}
+
+func countFacadeStdin(resultPaths []string, paths ...string) int {
+	count := 0
+	for _, path := range append(append([]string{}, resultPaths...), paths...) {
+		if path == "-" {
+			count++
+		}
+	}
+	return count
+}
+
+func facadeValueHash(domain string, value any) string {
+	payload, _ := json.Marshal(value)
+	sum := sha256.Sum256(append([]byte("gentle-ai.facade-"+domain+"/v1\x00"), payload...))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func facadePayloadHash(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func facadeSevere(severity string) bool {
+	switch strings.ToUpper(strings.TrimSpace(severity)) {
+	case "BLOCKER", "CRITICAL":
+		return true
+	default:
+		return false
+	}
+}

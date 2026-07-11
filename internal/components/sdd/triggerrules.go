@@ -68,7 +68,7 @@ func renderDirective(b model.TriggerBinding) string {
 	if len(b.Run) == 1 {
 		switch b.Run[0] {
 		case "review-receipt-validator":
-			return "validate the existing content-bound receipt with native `review-validate`; never start a reviewer or reset its budget"
+			return "validate the existing content-bound receipt with native `gentle-ai review validate --gate <gate>`; never start a reviewer or reset its budget"
 		case "review-start":
 			return "if no valid receipt exists, explicitly run `review/start(target)`; otherwise reuse the receipt"
 		}

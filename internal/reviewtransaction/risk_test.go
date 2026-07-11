@@ -1,6 +1,10 @@
 package reviewtransaction
 
-import "testing"
+import (
+	"fmt"
+	"math"
+	"testing"
+)
 
 func TestClassifyRiskUsesDeterministicFirstMatch(t *testing.T) {
 	tests := []struct {
@@ -17,12 +21,12 @@ func TestClassifyRiskUsesDeterministicFirstMatch(t *testing.T) {
 		{name: "permissions signal is high", input: RiskInput{Signals: []RiskSignal{SignalPermissions}}, want: RiskHigh},
 		{name: "shell process signal is high", input: RiskInput{Signals: []RiskSignal{SignalShellProcess}}, want: RiskHigh},
 		{
-			name: "more than 400 lines is high before trivial",
+			name: "generated golden does not raise authored risk",
 			input: RiskInput{
 				OnlyNonExecutableChanges: true,
-				Stats:                    []DiffStat{{Path: "docs/generated.md", Additions: 401, Generated: true}},
+				Stats:                    []DiffStat{{Path: "testdata/golden/rendered.golden", Additions: 401, Generated: true}},
 			},
-			want: RiskHigh,
+			want: RiskLow,
 		},
 		{
 			name:  "exactly 400 non executable lines is low",
@@ -64,5 +68,45 @@ func TestCountChangedLinesHasOneCrossAdapterRule(t *testing.T) {
 	}
 	if _, err := CountChangedLines([]DiffStat{{Path: "same.go", Additions: 1}, {Path: "same.go", Deletions: 1}}); err == nil {
 		t.Fatal("CountChangedLines() accepted duplicate logical paths")
+	}
+}
+
+func TestConfigurationReviewPathRecognizesDotEnvVariants(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: ".env", want: true},
+		{path: "config/.env.production", want: true},
+		{path: "config/env.example", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isConfigurationReviewPath(tt.path); got != tt.want {
+				t.Fatalf("isConfigurationReviewPath(%q) = %t, want %t", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCorrectionBudgetBoundaries(t *testing.T) {
+	tests := []struct {
+		original int
+		want     int
+	}{
+		{original: 0, want: 0}, {original: 1, want: 1}, {original: 2, want: 1},
+		{original: 196, want: 98}, {original: 399, want: 200}, {original: 400, want: 200},
+		{original: 401, want: 200}, {original: 867, want: 200}, {original: math.MaxInt, want: 200},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d original lines", tt.original), func(t *testing.T) {
+			got, err := CorrectionBudget(tt.original)
+			if err != nil || got != tt.want {
+				t.Fatalf("CorrectionBudget(%d) = %d, %v; want %d", tt.original, got, err, tt.want)
+			}
+		})
+	}
+	if _, err := CorrectionBudget(-1); err == nil {
+		t.Fatal("CorrectionBudget() accepted negative original lines")
 	}
 }

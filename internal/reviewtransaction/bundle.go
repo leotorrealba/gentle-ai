@@ -203,10 +203,16 @@ func validateBundleExpectation(ctx context.Context, repo string, bundle ChainBun
 	if expected.LineageID != bundle.LineageID || expected.GenesisRevision != bundle.GenesisRevision || expected.HeadRevision != bundle.HeadRevision || expected.ChainIdentity != bundle.ChainIdentity || expected.BundleDigest != bundle.BundleDigest {
 		return errors.New("review chain bundle does not match the expected chain identity")
 	}
+	if genesis := chain.Records[0].Transaction; genesis.Mode == ModeOrdinaryBounded && !genesis.hasCorrectionBudget() {
+		return errors.New("portable ordinary_bounded bundle requires correction budget fields")
+	}
 	if err := validateSnapshot(expected.Snapshot); err != nil {
 		return fmt.Errorf("expected current snapshot: %w", err)
 	}
 	terminal := chain.Records[len(chain.Records)-1].Transaction
+	if err := validateRepositoryBudgetEvidence(ctx, repo, chain.Records); err != nil {
+		return fmt.Errorf("review chain bundle: %w", err)
+	}
 	if bundle.TerminalReceipt != nil {
 		if err := validateReceiptStructure(expected.Receipt); err != nil {
 			return fmt.Errorf("expected receipt: %w", err)

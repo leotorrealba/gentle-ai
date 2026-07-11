@@ -123,12 +123,19 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 	}
 	record := chain.Records[len(chain.Records)-1]
 	revision := chain.HeadRevision
-	bundle, err := store.ExportBundle()
-	if err != nil {
-		return invalid("authoritative review chain bundle identity cannot be derived: " + err.Error())
-	}
-	if revision != request.StoreRevision || chain.GenesisRevision != request.GenesisRevision || chain.Identity != request.ChainIdentity || bundle.BundleDigest != request.BundleDigest {
+	if revision != request.StoreRevision || chain.GenesisRevision != request.GenesisRevision || chain.Identity != request.ChainIdentity {
 		return invalid("authoritative review transaction chain identity is stale")
+	}
+	bundleDigest := request.BundleDigest
+	if request.BundleDigest != request.ChainIdentity {
+		bundle, err := store.ExportBundle()
+		if err != nil {
+			return invalid("authoritative review chain bundle identity cannot be derived: " + err.Error())
+		}
+		if bundle.BundleDigest != request.BundleDigest {
+			return invalid("authoritative review transaction chain identity is stale")
+		}
+		bundleDigest = bundle.BundleDigest
 	}
 	authoritativeReceipt, err := record.Transaction.Receipt()
 	if err != nil {
@@ -149,15 +156,25 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 	if request.Gate == GatePrePush && record.Transaction.Snapshot.Kind == TargetCurrentChanges && snapshot.BaseTree == snapshot.CandidateTree {
 		return invalid("pre-push current-changes receipt requires a delivered tree change")
 	}
-	policyHash := hashArtifactPayload(preimages.policy)
-	ledgerHash, ledgerFindingsHash, err := hashLedgerPayload(preimages.ledger)
-	if err != nil {
-		return invalid("frozen ledger cannot be validated: " + err.Error())
+	policyHash := authoritativeReceipt.PolicyHash
+	if hasArtifactSource(request.PolicyArtifact, request.PolicyContent) {
+		policyHash = hashArtifactPayload(preimages.policy)
 	}
-	if ledgerFindingsHash != record.Transaction.LedgerFindingsHash {
-		return invalid("frozen ledger findings do not match the authoritative transaction")
+	ledgerHash := authoritativeReceipt.LedgerHash
+	if hasArtifactSource(request.LedgerArtifact, request.LedgerContent) {
+		var ledgerFindingsHash string
+		ledgerHash, ledgerFindingsHash, err = hashLedgerPayload(preimages.ledger)
+		if err != nil {
+			return invalid("frozen ledger cannot be validated: " + err.Error())
+		}
+		if ledgerFindingsHash != record.Transaction.LedgerFindingsHash {
+			return invalid("frozen ledger findings do not match the authoritative transaction")
+		}
 	}
-	evidenceHash := hashArtifactPayload(preimages.evidence)
+	evidenceHash := authoritativeReceipt.EvidenceHash
+	if hasArtifactSource(request.EvidenceArtifact, request.EvidenceContent) {
+		evidenceHash = hashArtifactPayload(preimages.evidence)
+	}
 	fixDeltaHash := record.Transaction.FixDeltaHash
 	if record.Transaction.Snapshot.Kind == TargetFixDiff {
 		fixDeltaHash = FixDeltaHashForSnapshot(record.Transaction.Snapshot)
@@ -172,7 +189,7 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 	gateContext := GateContext{
 		Gate: request.Gate, LineageID: record.Transaction.LineageID, Generation: record.Transaction.Generation,
 		StoreRevision: revision, GenesisRevision: chain.GenesisRevision, ChainIdentity: chain.Identity,
-		BundleDigest: bundle.BundleDigest,
+		BundleDigest: bundleDigest,
 		BaseTree:     snapshot.BaseTree, CandidateTree: snapshot.CandidateTree, PathsDigest: snapshot.PathsDigest,
 		FixDeltaHash: fixDeltaHash, PolicyHash: policyHash, LedgerHash: ledgerHash, EvidenceHash: evidenceHash,
 		BaseRelationshipValid: snapshot.BaseTree == receipt.BaseTree,
@@ -366,13 +383,6 @@ func validateGateRequest(request GateRequest) error {
 	if !validSHA256(request.StoreRevision) || !validSHA256(request.GenesisRevision) || !validSHA256(request.ChainIdentity) || !validSHA256(request.BundleDigest) {
 		return errors.New("gate request requires the exact authoritative store revision, genesis, chain identity, and bundle digest")
 	}
-	for label, source := range map[string][2]string{
-		"policy": {request.PolicyArtifact, request.PolicyContent}, "ledger": {request.LedgerArtifact, request.LedgerContent}, "evidence": {request.EvidenceArtifact, request.EvidenceContent},
-	} {
-		if strings.TrimSpace(source[0]) == "" && strings.TrimSpace(source[1]) == "" {
-			return fmt.Errorf("gate request requires %s artifact", label)
-		}
-	}
 	if request.Gate == GateRelease && request.Release == nil {
 		return errors.New("release gate requires an immutable release request")
 	}
@@ -474,10 +484,10 @@ func readGateArtifactPreimages(request GateRequest) (gateArtifactPreimages, erro
 		required             bool
 		destination          *[]byte
 	}{
-		{"policy", request.PolicyArtifact, request.PolicyContent, true, &result.policy},
-		{"ledger", request.LedgerArtifact, request.LedgerContent, true, &result.ledger},
+		{"policy", request.PolicyArtifact, request.PolicyContent, false, &result.policy},
+		{"ledger", request.LedgerArtifact, request.LedgerContent, false, &result.ledger},
 		{"fix delta", request.FixDeltaArtifact, request.FixDeltaContent, false, &result.fixDelta},
-		{"verification evidence", request.EvidenceArtifact, request.EvidenceContent, true, &result.evidence},
+		{"verification evidence", request.EvidenceArtifact, request.EvidenceContent, false, &result.evidence},
 	} {
 		*item.destination, err = read(item.label, item.path, item.content, item.required)
 		if err != nil {
@@ -508,6 +518,10 @@ func readGateArtifactPreimages(request GateRequest) (gateArtifactPreimages, erro
 		}
 	}
 	return result, nil
+}
+
+func hasArtifactSource(path, content string) bool {
+	return strings.TrimSpace(path) != "" || content != ""
 }
 
 func validateFixDeltaArtifact(payload []byte, transaction Transaction) (string, error) {

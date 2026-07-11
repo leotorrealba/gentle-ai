@@ -13,13 +13,28 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
+	"syscall"
 )
 
 const RecordSchema = "gentle-ai.review-record/v1"
 
 var ErrConcurrentUpdate = errors.New("review transaction changed concurrently")
 var ErrInvalidSuccessor = errors.New("review transaction successor is invalid")
+
+var reviewRuntimeGOOS = func() string { return runtime.GOOS }
+var syncReviewDirectory = func(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return err
+	}
+	return directory.Close()
+}
 
 type Record struct {
 	Schema           string      `json:"schema"`
@@ -32,6 +47,7 @@ type Store struct {
 	Dir       string
 	lineageID string
 	repo      string
+	readOnly  bool
 }
 
 type ValidatedChain struct {
@@ -48,13 +64,62 @@ func AuthoritativeStore(ctx context.Context, repo, lineageID string) (Store, err
 	if err := validateLineageID(lineageID); err != nil {
 		return Store{}, err
 	}
+	authorityRoot, root, err := authoritativeStoreRoot(ctx, repo)
+	if err != nil {
+		return Store{}, err
+	}
+	dir := filepath.Join(authorityRoot, lineageID)
+	relative, err := filepath.Rel(authorityRoot, dir)
+	if err != nil || relative != lineageID || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return Store{}, errors.New("lineage_id escapes the repository review store")
+	}
+	_, statErr := os.Stat(filepath.Join(dir, "HEAD"))
+	return Store{Dir: dir, lineageID: lineageID, repo: root, readOnly: statErr == nil}, nil
+}
+
+// DiscoverAuthoritativeStores returns every canonical lineage rooted in the
+// repository Git common directory. Callers still validate each chain before
+// treating it as review authority.
+func DiscoverAuthoritativeStores(ctx context.Context, repo string) ([]Store, error) {
+	authorityRoot, root, err := authoritativeStoreRoot(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(authorityRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []Store{}, nil
+		}
+		return nil, err
+	}
+	stores := make([]Store, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || validateLineageID(entry.Name()) != nil {
+			continue
+		}
+		stores = append(stores, Store{
+			Dir: filepath.Join(authorityRoot, entry.Name()), lineageID: entry.Name(), repo: root, readOnly: true,
+		})
+	}
+	return stores, nil
+}
+
+func authoritativeStoreRoot(ctx context.Context, repo string) (string, string, error) {
+	base, root, err := reviewAuthorityRoot(ctx, repo)
+	if err != nil {
+		return "", "", err
+	}
+	return filepath.Join(base, "v1"), root, nil
+}
+
+func reviewAuthorityRoot(ctx context.Context, repo string) (string, string, error) {
 	root, err := (SnapshotBuilder{Repo: repo}).repositoryRoot(ctx)
 	if err != nil {
-		return Store{}, fmt.Errorf("resolve authoritative review repository: %w", err)
+		return "", "", fmt.Errorf("resolve authoritative review repository: %w", err)
 	}
 	output, err := runGit(ctx, root, nil, nil, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
-		return Store{}, fmt.Errorf("resolve repository Git common directory: %w", err)
+		return "", "", fmt.Errorf("resolve repository Git common directory: %w", err)
 	}
 	commonDir := strings.TrimSpace(string(output))
 	if !filepath.IsAbs(commonDir) {
@@ -62,15 +127,10 @@ func AuthoritativeStore(ctx context.Context, repo, lineageID string) (Store, err
 	}
 	commonDir, err = filepath.Abs(commonDir)
 	if err != nil {
-		return Store{}, err
+		return "", "", err
 	}
-	authorityRoot := filepath.Join(filepath.Clean(commonDir), "gentle-ai", "review-transactions", "v1")
-	dir := filepath.Join(authorityRoot, lineageID)
-	relative, err := filepath.Rel(authorityRoot, dir)
-	if err != nil || relative != lineageID || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return Store{}, errors.New("lineage_id escapes the repository review store")
-	}
-	return Store{Dir: dir, lineageID: lineageID, repo: root}, nil
+	authorityRoot := filepath.Join(filepath.Clean(commonDir), "gentle-ai", "review-transactions")
+	return authorityRoot, root, nil
 }
 
 func validateLineageID(lineageID string) error {
@@ -81,6 +141,9 @@ func validateLineageID(lineageID string) error {
 }
 
 func (store Store) Append(expectedRevision string, record Record) (string, error) {
+	if store.readOnly {
+		return "", ErrLegacyReadOnly
+	}
 	if strings.TrimSpace(store.Dir) == "" {
 		return "", errors.New("review store directory is required")
 	}
@@ -136,6 +199,21 @@ func (store Store) Append(expectedRevision string, record Record) (string, error
 		if !validInitialStoreRecord(record) {
 			return "", fmt.Errorf("%w: first event must be review/start in reviewing state", ErrInvalidSuccessor)
 		}
+		if record.Transaction.Mode == ModeOrdinaryBounded && !record.Transaction.hasCorrectionBudget() {
+			return "", fmt.Errorf("%w: new ordinary_bounded review/start requires correction budget fields", ErrInvalidSuccessor)
+		}
+		if store.repo != "" {
+			builder := SnapshotBuilder{Repo: store.repo}
+			if err := builder.ValidateEvidence(context.Background(), record.Transaction.Snapshot); err != nil {
+				return "", fmt.Errorf("%w: initial snapshot is not repository-derived: %v", ErrInvalidSuccessor, err)
+			}
+			if record.Transaction.hasCorrectionBudget() {
+				risk, changedLines, err := builder.ClassifySnapshotRisk(context.Background(), record.Transaction.Snapshot)
+				if err != nil || changedLines != *record.Transaction.OriginalChangedLines || risk != record.Transaction.RiskLevel {
+					return "", fmt.Errorf("%w: original risk inputs do not match repository tree evidence", ErrInvalidSuccessor)
+				}
+			}
+		}
 	} else {
 		chain, err := store.loadChain(current)
 		if err != nil {
@@ -143,8 +221,15 @@ func (store Store) Append(expectedRevision string, record Record) (string, error
 		}
 		previous := chain.Records[len(chain.Records)-1]
 		if previous.Transaction.State == StateFixing && record.Transaction.State == StateFixValidating && store.repo != "" {
-			if err := (SnapshotBuilder{Repo: store.repo}).ValidateEvidence(context.Background(), record.Transaction.Snapshot); err != nil {
+			builder := SnapshotBuilder{Repo: store.repo}
+			if err := builder.ValidateEvidence(context.Background(), record.Transaction.Snapshot); err != nil {
 				return "", fmt.Errorf("%w: correction snapshot is not repository-derived: %v", ErrInvalidSuccessor, err)
+			}
+			if record.Transaction.hasCorrectionBudget() {
+				actualChangedLines, err := builder.ChangedLines(context.Background(), record.Transaction.Snapshot)
+				if err != nil || record.Transaction.ActualCorrectionLines == nil || actualChangedLines != *record.Transaction.ActualCorrectionLines {
+					return "", fmt.Errorf("%w: actual correction lines do not match repository tree evidence", ErrInvalidSuccessor)
+				}
 			}
 		}
 		if err := validateSuccessor(previous.Transaction, record.Transaction, record.Operation); err != nil {
@@ -252,6 +337,11 @@ func (store Store) loadChain(headRevision string) (ValidatedChain, error) {
 			return ValidatedChain{}, fmt.Errorf("review chain successor %s: %w", revisions[index], err)
 		}
 	}
+	if store.repo != "" {
+		if err := validateRepositoryBudgetEvidence(context.Background(), store.repo, records); err != nil {
+			return ValidatedChain{}, err
+		}
+	}
 
 	chain := ValidatedChain{
 		Records: records, Revisions: revisions,
@@ -259,6 +349,29 @@ func (store Store) loadChain(headRevision string) (ValidatedChain, error) {
 	}
 	chain.Identity = chainIdentity(revisions)
 	return chain, nil
+}
+
+func validateRepositoryBudgetEvidence(ctx context.Context, repo string, records []Record) error {
+	if len(records) == 0 || !records[0].Transaction.hasCorrectionBudget() {
+		return nil
+	}
+	builder := SnapshotBuilder{Repo: repo}
+	genesis := records[0].Transaction
+	risk, changedLines, err := builder.ClassifySnapshotRisk(ctx, genesis.Snapshot)
+	if err != nil || changedLines != *genesis.OriginalChangedLines || risk != genesis.RiskLevel {
+		return errors.New("original risk inputs do not match repository tree evidence")
+	}
+	for index := 1; index < len(records); index++ {
+		previous, next := records[index-1].Transaction, records[index].Transaction
+		if previous.State != StateFixing || next.State != StateFixValidating {
+			continue
+		}
+		actual, countErr := builder.ChangedLines(ctx, next.Snapshot)
+		if countErr != nil || next.ActualCorrectionLines == nil || actual != *next.ActualCorrectionLines {
+			return errors.New("actual correction lines do not match repository tree evidence")
+		}
+	}
+	return nil
 }
 
 func (store Store) loadRevision(revision string) (Record, string, error) {
@@ -309,6 +422,9 @@ func validateSuccessor(previous, next Transaction, operation string) error {
 	if previous.RiskLevel != next.RiskLevel {
 		return fmt.Errorf("%w: native risk classification is immutable", ErrInvalidSuccessor)
 	}
+	if !equalOptionalInt(previous.OriginalChangedLines, next.OriginalChangedLines) || !equalOptionalInt(previous.CorrectionBudget, next.CorrectionBudget) {
+		return fmt.Errorf("%w: original changed lines and correction budget are immutable", ErrInvalidSuccessor)
+	}
 	lensStateChanged := !reflect.DeepEqual(previous.LensResults, next.LensResults) ||
 		previous.Counters.RiskExecutions != next.Counters.RiskExecutions ||
 		previous.Counters.ResilienceExecutions != next.Counters.ResilienceExecutions ||
@@ -349,6 +465,34 @@ func validateSuccessor(previous, next Transaction, operation string) error {
 		if err := pathsAreSubset(next.Snapshot.Paths, genesisPaths); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidSuccessor, err)
 		}
+		expected := previous
+		var err error
+		if next.ActualCorrectionLines == nil {
+			err = expected.CompleteFix(next.Snapshot, next.FixDeltaHash, next.FixFindingIDs)
+		} else {
+			err = expected.CompleteFix(next.Snapshot, next.FixDeltaHash, next.FixFindingIDs, *next.ActualCorrectionLines)
+		}
+		if err != nil || !transactionsEqual(expected, next) {
+			return fmt.Errorf("%w: fix completion must replay the exact budgeted transition", ErrInvalidSuccessor)
+		}
+	}
+	fixStart := previous.State == StateFixRequired && (next.State == StateFixing || previous.hasCorrectionBudget() && next.State == StateEscalated)
+	if fixStart {
+		expected := previous
+		var err error
+		if next.ProposedCorrectionLines == nil {
+			err = expected.BeginFix(next.FailedEvidenceRevision)
+		} else {
+			err = expected.BeginFix(next.FailedEvidenceRevision, *next.ProposedCorrectionLines)
+		}
+		if operation != "review/begin-fix" || err != nil || !transactionsEqual(expected, next) {
+			return fmt.Errorf("%w: fix start must replay the exact budgeted transition", ErrInvalidSuccessor)
+		}
+	} else if !equalOptionalInt(previous.ProposedCorrectionLines, next.ProposedCorrectionLines) {
+		return fmt.Errorf("%w: proposed correction lines changed outside fix start", ErrInvalidSuccessor)
+	}
+	if !fixCompletion && !equalOptionalInt(previous.ActualCorrectionLines, next.ActualCorrectionLines) {
+		return fmt.Errorf("%w: actual correction lines changed outside fix completion", ErrInvalidSuccessor)
 	}
 	releaseBinding := previous.Release == nil && next.Release != nil
 	if previous.Release != nil && !reflect.DeepEqual(previous.Release, next.Release) {
@@ -476,6 +620,10 @@ func followUpSliceIsPrefix(previous, next []FollowUp) bool {
 		return false
 	}
 	return reflect.DeepEqual(previous, next[:len(previous)])
+}
+
+func equalOptionalInt(left, right *int) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
 func validateSuccessorCounters(previous, next Transaction) error {
@@ -687,5 +835,16 @@ func writeAtomic(path string, payload []byte, mode os.FileMode) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempPath, path)
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	if err := syncReviewDirectory(filepath.Dir(path)); err != nil {
+		// NTFS and some filesystems do not support syncing directory handles.
+		unsupported := errors.Is(err, syscall.EINVAL) || errors.Is(err, errors.ErrUnsupported) ||
+			reviewRuntimeGOOS() == "windows" && errors.Is(err, os.ErrPermission)
+		if !unsupported {
+			return fmt.Errorf("sync parent directory for %q: %w", path, err)
+		}
+	}
+	return nil
 }
