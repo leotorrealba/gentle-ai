@@ -136,6 +136,8 @@ func TestGoldenSDD_OpenCode(t *testing.T) {
 	// Golden-check a representative command file.
 	sddInit := readTestFile(t, filepath.Join(home, ".config", "opencode", "commands", "sdd-init.md"))
 	assertGolden(t, "sdd-opencode-cmd-sdd-init.golden", sddInit)
+	sddApply := readTestFile(t, filepath.Join(home, ".config", "opencode", "commands", "sdd-apply.md"))
+	assertGolden(t, "sdd-opencode-cmd-sdd-apply.golden", sddApply)
 
 	// Golden-check a representative SDD skill file.
 	skillInit := readTestFile(t, filepath.Join(home, ".config", "opencode", "skills", "sdd-init", "SKILL.md"))

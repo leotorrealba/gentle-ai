@@ -63,7 +63,7 @@ func TestReceiptDistinguishesReviewedAndFinalTreesAndValidatesExactGateInputs(t 
 func TestReceiptParserIsStrictAndTerminalVocabularyIsClosed(t *testing.T) {
 	tx := newTestTransaction(t, ModeOrdinary4R)
 	_ = tx.StartReview()
-	_ = tx.FreezeFindings(nil, hash("1"))
+	_ = freezeTestFindings(tx, []Finding{})
 	_, _ = tx.ClassifyEvidence(nil)
 	_ = tx.BeginFinalVerification()
 	_ = tx.CompleteFinalVerification(hash("2"), true)
@@ -99,7 +99,7 @@ func TestNewLineageRequiresExplicitDifferentIdentity(t *testing.T) {
 func TestReleaseGateRequiresCompleteImmutablePublicationBoundary(t *testing.T) {
 	tx := newTestTransaction(t, ModeOrdinary4R)
 	_ = tx.StartReview()
-	_ = tx.FreezeFindings([]Finding{}, hash("1"))
+	_ = freezeTestFindings(tx, []Finding{})
 	_, _ = tx.ClassifyEvidence([]FindingEvidence{})
 	release := ReleaseEvidence{
 		ReleaseTree:             tx.FinalCandidateTree,
@@ -162,7 +162,7 @@ func TestJudgmentDayReceiptCarriesTwoJudgeProof(t *testing.T) {
 	}, hash("5")); err != nil {
 		t.Fatal(err)
 	}
-	_ = tx.FreezeFindings([]Finding{}, hash("6"))
+	_ = freezeTestFindings(tx, []Finding{})
 	_, _ = tx.ClassifyEvidence([]FindingEvidence{})
 	_ = tx.BeginFinalVerification()
 	_ = tx.CompleteFinalVerification(hash("7"), true)

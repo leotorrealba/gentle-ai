@@ -25,9 +25,9 @@ If you ARE the `sdd-verify` sub-agent (NOT the orchestrator), the gate above doe
 
 Generated technical artifacts default to English. Do not inherit the user's conversational language or the active persona's regional voice for SDD artifacts unless the user explicitly requests that artifact language or the project convention requires it.
 
-If Spanish technical artifacts are explicitly requested, use neutral/professional Spanish unless the user explicitly asks for a regional variant.
+If technical artifacts are explicitly requested in another language, use a neutral/professional register unless the user explicitly requests a different tone or regional variant.
 
-Public/contextual comments follow the target context language by default. Explicit user language or tone overrides win; Spanish comments default to neutral/professional Spanish unless the user or target context clearly calls for regional tone.
+Public/contextual comments follow the target context language by default. Explicit user language or tone overrides win; otherwise use a neutral/professional register unless the target context clearly calls for another tone or regional variant.
 
 ## Activation Contract
 
@@ -50,7 +50,8 @@ The orchestrator should provide structured status from `skills/_shared/sdd-statu
 - Record current test/build commands, exit codes, and `test_output_hash` / `build_output_hash` values in the strict envelope.
 - Model/provider/profile/effort selection remains user-owned and is never changed by verification.
 - This is the one independent requirements/runtime final verification. A contradiction or new failing check returns FAIL/escalation; it never starts 4R, Judgment Day, a refuter, another correction, or scoped validation.
-- Consume exact review artifacts from structured status (`reviews/transaction.json`, `ledger.json`, `receipt.json`, `gate-context.json`, or equivalent `sdd/{change-name}/review/*` Engram topics). Do not substitute prompt-only state when native artifacts exist.
+- For native final verification, consume only the authoritative preterminal transaction plus the preserved policy and canonical ledger preimages. Do not require `receipt.json`, `chain-bundle.json`, `gate-context.json`, or any terminal-only artifact: final verification must complete before those artifacts can exist.
+- Return and preserve the exact canonical verification-evidence bytes, not only their hash. The parent hashes that preimage for `complete-final-verification` and retains the same bytes for the later GateRequest; hashes cannot reconstruct artifact content.
 
 ## Decision Gates
 
@@ -118,9 +119,9 @@ metadata:
 
 Generated technical artifacts default to English. Do not inherit the user's conversational language or the active persona's regional voice for SDD artifacts unless the user explicitly requests that artifact language or the project convention requires it.
 
-If Spanish technical artifacts are explicitly requested, use neutral/professional Spanish unless the user explicitly asks for a regional variant.
+If technical artifacts are explicitly requested in another language, use a neutral/professional register unless the user explicitly requests a different tone or regional variant.
 
-Public/contextual comments follow the target context language by default. Explicit user language or tone overrides win; Spanish comments default to neutral/professional Spanish unless the user or target context clearly calls for regional tone.
+Public/contextual comments follow the target context language by default. Explicit user language or tone overrides win; otherwise use a neutral/professional register unless the target context clearly calls for another tone or regional variant.
 
 ## Purpose
 
@@ -137,6 +138,8 @@ You are a VERIFY sub-agent. Your job: check implemented changes match spec accep
 - Preserve user-owned model/provider/profile/effort selection; do not prescribe or override it.
 - Do not fix issues; report them for the orchestrator/user
 - A contradiction or failing check escalates; never start another review/fix loop.
+- When participating in native final verification, use only the preterminal transaction and preserved policy/ledger inputs. Do not require a receipt, bundle, or gate context that can exist only after completion.
+- Return the exact verification-evidence content with the result so the parent can hash it and preserve its preimage for native gate validation.
 - Return minimal report
 
 ## Return Minimal Report

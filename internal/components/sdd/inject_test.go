@@ -632,7 +632,7 @@ func TestInjectOpenCodePreservesExistingOrchestratorPromptWhenRequested(t *testi
 	for _, wanted := range []string{
 		"### SDD Session Preflight (HARD GATE)",
 		"### Mandatory Delegation Triggers (Non-Skippable)",
-		"TOTALMENTE obligatorio",
+		"fully mandatory",
 		"Semantic guard",
 		"execution, not delegation",
 		"not a substitute for delegation",
@@ -744,7 +744,7 @@ func TestInjectOpenCodeMigratesPreservedLegacyOrchestratorPromptReferences(t *te
 		"business rules, implications, impact, edge cases",
 		"Never launch `sdd-apply` just because the user asked to implement a feature",
 		"### Mandatory Delegation Triggers (Non-Skippable)",
-		"TOTALMENTE obligatorio",
+		"fully mandatory",
 		"4-file rule",
 		"Multi-file write rule",
 		"Lifecycle receipt rule",
@@ -786,10 +786,11 @@ func TestInjectOpenCodeUpgradesV1DelegationLensTable(t *testing.T) {
 		t.Fatalf("MkdirAll(settings dir) error = %v", err)
 	}
 
-	const v1Block = "CUSTOM_PROMPT_HEAD\n\n" +
+	const userContent = "CUSTOM_PROMPT_HEAD\nUser-authored wording must remain " + legacyMandatoryWording + "."
+	const v1Block = userContent + "\n\n" +
 		"<!-- gentle-ai:delegation-hard-gates-migration -->\n" +
 		"### Mandatory Delegation Triggers (Non-Skippable)\n\n" +
-		"These gates are non-skippable hard gates, not recommendations. They are TOTALMENTE obligatorio: do not skip them.\n\n" +
+		"These gates are non-skippable hard gates, not recommendations. They are " + legacyMandatoryWording + ": do not skip them.\n\n" +
 		"Semantic guard: delegate means using OpenCode's native Task tool. Running local scripts is execution, not delegation.\n\n" +
 		"1. **4-file rule**: delegate.\n" +
 		"2. **Multi-file write rule**: a fresh review is required after delegated implementation, not a substitute for delegation.\n" +
@@ -833,10 +834,20 @@ func TestInjectOpenCodeUpgradesV1DelegationLensTable(t *testing.T) {
 	}
 	text := string(settingsBytes)
 
-	if !strings.Contains(text, "CUSTOM_PROMPT_HEAD") {
-		t.Fatal("opencode.json lost the user's custom prompt content outside the migration block")
+	var settings struct {
+		Agent map[string]struct {
+			Prompt string `json:"prompt"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(settingsBytes, &settings); err != nil {
+		t.Fatalf("Unmarshal(opencode.json) error = %v", err)
+	}
+	prompt := settings.Agent["gentle-orchestrator"].Prompt
+	if !strings.HasPrefix(prompt, userContent+"\n\n") {
+		t.Fatalf("user-authored content outside the migration block changed:\n%s", prompt)
 	}
 	for _, wanted := range []string{
+		"fully mandatory",
 		"triage the diff deterministically",
 		"**Trivial diff**",
 		"zero executable code and zero configuration changes",
@@ -859,6 +870,18 @@ func TestInjectOpenCodeUpgradesV1DelegationLensTable(t *testing.T) {
 		if strings.Contains(text, stale) {
 			t.Fatalf("opencode.json retained stale v1 lens-selection text %q", stale)
 		}
+	}
+	managedStart := strings.Index(prompt, "<!-- gentle-ai:delegation-hard-gates-migration -->")
+	managedEnd := strings.Index(prompt, "<!-- /gentle-ai:delegation-hard-gates-migration -->")
+	if managedStart < 0 || managedEnd < managedStart {
+		t.Fatal("opencode.json missing delegation hard-gates migration block")
+	}
+	managedBlock := prompt[managedStart:managedEnd]
+	if strings.Contains(managedBlock, legacyMandatoryWording) {
+		t.Fatalf("managed delegation block retained legacy wording %q", legacyMandatoryWording)
+	}
+	if !strings.Contains(managedBlock, "fully mandatory") {
+		t.Fatal("managed delegation block missing migrated wording \"fully mandatory\"")
 	}
 	if strings.Count(text, "#### Review Lens Selection") != 1 {
 		t.Fatalf("opencode.json must contain exactly one Review Lens Selection section; got %d", strings.Count(text, "#### Review Lens Selection"))

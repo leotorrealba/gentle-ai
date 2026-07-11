@@ -160,7 +160,7 @@ func TestExplicitPrePRRequestWithoutRemotePreservesUnchangedBase(t *testing.T) {
 	ledgerPath := filepath.Join(dir, "ledger.json")
 	evidencePath := filepath.Join(dir, "evidence.md")
 	for path, content := range map[string]string{
-		policyPath: "bounded policy\n", ledgerPath: "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}\n", evidencePath: "verified\n",
+		policyPath: "bounded policy\n", ledgerPath: "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}", evidencePath: "verified\n",
 	} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
@@ -172,13 +172,14 @@ func TestExplicitPrePRRequestWithoutRemotePreservesUnchangedBase(t *testing.T) {
 	}
 	policyHash, _ := HashArtifact(policyPath)
 	ledgerHash, _ := HashLedgerArtifact(ledgerPath)
+	ledgerPayload, _ := os.ReadFile(ledgerPath)
 	evidenceHash, _ := HashArtifact(evidencePath)
 	tx, err := NewTransaction(Start{LineageID: "compatible-base", Mode: ModeOrdinary4R, Generation: 1, Snapshot: snapshot, PolicyHash: policyHash})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = tx.StartReview()
-	_ = tx.FreezeFindings([]Finding{}, ledgerHash)
+	_ = tx.FreezeFindings([]Finding{}, ledgerPayload, ledgerHash)
 	_, _ = tx.ClassifyEvidence([]FindingEvidence{})
 	_ = tx.BeginFinalVerification()
 	_ = tx.CompleteFinalVerification(evidenceHash, true)
@@ -301,7 +302,7 @@ func newCompatiblePrePRFixture(t *testing.T, deliveryPath, basePath string) *com
 	evidencePath := filepath.Join(dir, "evidence.md")
 	policyPayload := []byte("# Bounded review policy\n\npre_pr_ci_issuer: trusted-ci\npre_pr_ci_ed25519_public_key: " + base64.StdEncoding.EncodeToString(publicKey) + "\n")
 	for path, payload := range map[string][]byte{
-		policyPath: policyPayload, ledgerPath: []byte("{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}\n"), evidencePath: []byte("verified\n"),
+		policyPath: policyPayload, ledgerPath: []byte("{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}"), evidencePath: []byte("verified\n"),
 	} {
 		if err := os.WriteFile(path, payload, 0o644); err != nil {
 			t.Fatal(err)
@@ -313,13 +314,14 @@ func newCompatiblePrePRFixture(t *testing.T, deliveryPath, basePath string) *com
 	}
 	policyHash, _ := HashArtifact(policyPath)
 	ledgerHash, _ := HashLedgerArtifact(ledgerPath)
+	ledgerPayload, _ := os.ReadFile(ledgerPath)
 	evidenceHash, _ := HashArtifact(evidencePath)
 	tx, err := NewTransaction(Start{LineageID: "compatible-base", Mode: ModeOrdinary4R, Generation: 1, Snapshot: snapshot, PolicyHash: policyHash})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = tx.StartReview()
-	_ = tx.FreezeFindings([]Finding{}, ledgerHash)
+	_ = tx.FreezeFindings([]Finding{}, ledgerPayload, ledgerHash)
 	_, _ = tx.ClassifyEvidence([]FindingEvidence{})
 	_ = tx.BeginFinalVerification()
 	_ = tx.CompleteFinalVerification(evidenceHash, true)
@@ -470,7 +472,7 @@ func TestNativeReleaseGateDerivesCompleteImmutableBoundary(t *testing.T) {
 	dir := t.TempDir()
 	artifacts := map[string]string{
 		"policy":        "bounded release policy\n",
-		"ledger":        "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}\n",
+		"ledger":        CanonicalEmptyLedger,
 		"evidence":      "fresh verification evidence\n",
 		"configuration": "release configuration\n",
 		"generated":     "generated artifact manifest\n",
@@ -513,7 +515,8 @@ func TestNativeReleaseGateDerivesCompleteImmutableBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = tx.FreezeFindings([]Finding{}, hashes["ledger"])
+	ledger, _ := CanonicalLedger([]Finding{})
+	_ = tx.FreezeFindings([]Finding{}, ledger, hashes["ledger"])
 	revision, err = store.Append(revision, Record{Operation: "review/freeze-findings", Transaction: *tx})
 	if err != nil {
 		t.Fatal(err)
@@ -757,7 +760,7 @@ func nativeGateFixture(t *testing.T, repo, lineage string) (Transaction, Receipt
 	evidencePath := filepath.Join(dir, "evidence.md")
 	for path, content := range map[string]string{
 		policyPath:   "bounded policy\n",
-		ledgerPath:   "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}\n",
+		ledgerPath:   CanonicalEmptyLedger,
 		evidencePath: "verified\n",
 	} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -778,7 +781,11 @@ func nativeGateFixture(t *testing.T, repo, lineage string) (Transaction, Receipt
 	if err := tx.StartReview(); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.FreezeFindings([]Finding{}, ledgerHash); err != nil {
+	ledger, err := CanonicalLedger([]Finding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.FreezeFindings([]Finding{}, ledger, ledgerHash); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.ClassifyEvidence([]FindingEvidence{}); err != nil {
@@ -846,7 +853,11 @@ func appendApprovedStoreChain(t *testing.T, store Store, approved Transaction) s
 		t.Fatal(err)
 	}
 	frozen := reviewing
-	if err := frozen.FreezeFindings([]Finding{}, approved.LedgerHash); err != nil {
+	ledger, err := CanonicalLedger([]Finding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := frozen.FreezeFindings([]Finding{}, ledger, approved.LedgerHash); err != nil {
 		t.Fatal(err)
 	}
 	revision, err = store.Append(revision, Record{Operation: "review/freeze-findings", Transaction: frozen})

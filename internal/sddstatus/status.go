@@ -738,17 +738,13 @@ func RenderDispatcherMarkdown(status Status) string {
 		}
 	}
 	if status.NextRecommended == "review" {
-		transactionPath := "<artifact-store review transaction>"
-		if status.ChangeRoot != nil {
-			transactionPath = filepath.Join(*status.ChangeRoot, "reviews", "transaction.json")
-		}
 		lines = append(lines,
 			"",
 			"### Next Review Operation",
 			"- Build an explicit newline-delimited intended-untracked manifest outside the repository.",
-			fmt.Sprintf("- Run `gentle-ai review-start --cwd %q --lineage <new-lineage-id> --policy-file <policy-path> --intended-untracked-manifest <manifest-path> --machine-transaction-out %q`.", status.ActionContext.WorkspaceRoot, transactionPath),
-			"- The repository Git common directory plus canonical lineage ID determines the authoritative CAS store. transaction.json is non-authoritative machine output for artifact consumers and cannot reset counters on retry.",
-			"- Persist the frozen ledger, terminal receipt, and gate context at the exact artifact-store references; continue the existing transaction instead of starting another budget.",
+			fmt.Sprintf("- Run `gentle-ai review-start --cwd %q --lineage <new-lineage-id> --policy-file <policy-path> --intended-untracked-manifest <manifest-path>`.", status.ActionContext.WorkspaceRoot),
+			"- The repository Git common directory plus canonical lineage ID determines the authoritative CAS store; continue the existing transaction instead of starting another budget.",
+			"- Do not write artifact-store mirror files during review. Reconcile transaction, ledger, receipt, chain-bundle, and gate-context mirrors only at the final reconcile-terminal-mirrors step after review-validate allows.",
 		)
 	}
 

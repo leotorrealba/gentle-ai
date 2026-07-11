@@ -17,6 +17,8 @@ import (
 	"github.com/gentleman-programming/gentle-ai/internal/opencode"
 )
 
+const legacyMandatoryWording = "TOTALMENTE " + "obligatorio"
+
 type InjectionResult struct {
 	Changed bool
 	Files   []string
@@ -405,7 +407,7 @@ func Inject(homeDir string, adapter agents.Adapter, sddMode model.SDDModeID, opt
 					continue
 				}
 
-				content := assets.MustRead(commandsAssetDir + "/" + entry.Name())
+				content := renderBoundedReviewAsset(commandsAssetDir + "/" + entry.Name())
 				path := filepath.Join(commandsDir, entry.Name())
 				writeResult, err := filemerge.WriteFileAtomic(path, []byte(content), 0o644)
 				if err != nil {
@@ -1050,6 +1052,7 @@ func removeLegacyOpenCodePlainChatPreflightLines(prompt string) string {
 }
 
 func ensurePreservedOpenCodeDelegationHardGates(prompt string) string {
+	prompt = migrateLegacyMandatoryWordingInDelegationHardGates(prompt)
 	prompt = strings.NewReplacer(
 		"run a fresh-context review unless the diff is trivial docs/text",
 		"run the concrete review lens(es) selected by Review Lens Selection unless the diff is trivial (tier 1)",
@@ -1070,7 +1073,7 @@ func ensurePreservedOpenCodeDelegationHardGates(prompt string) string {
 <!-- gentle-ai:delegation-hard-gates-migration -->
 ### Mandatory Delegation Triggers (Non-Skippable)
 
-These gates are non-skippable hard gates, not recommendations. They are TOTALMENTE obligatorio: do not skip them, do not weaken them, and do not replace delegation-required gates with inline execution. Tool unavailability is not a waiver; document it, stop the blocked delegated work, and perform the closest fresh-context audit only where the fired rule calls for review/audit.
+These gates are non-skippable hard gates, not recommendations. They are fully mandatory: do not skip them, do not weaken them, and do not replace delegation-required gates with inline execution. Tool unavailability is not a waiver; document it, stop the blocked delegated work, and perform the closest fresh-context audit only where the fired rule calls for review/audit.
 
 Semantic guard: **delegate** means using OpenCode's native Task tool to invoke a configured sub-agent. Running local scripts, Python, or Bash inline is execution, not delegation.
 
@@ -1104,7 +1107,7 @@ Full 4R is reserved for tier 3; a standard diff never fans out to multiple lense
 
 	if strings.Contains(prompt, "Mandatory Delegation Triggers") &&
 		strings.Contains(prompt, "non-skippable hard gates") &&
-		strings.Contains(prompt, "TOTALMENTE obligatorio") &&
+		strings.Contains(prompt, "fully mandatory") &&
 		strings.Contains(prompt, "4-file rule") &&
 		strings.Contains(prompt, "Multi-file write rule") &&
 		strings.Contains(prompt, "Lifecycle receipt rule") &&
@@ -1144,6 +1147,41 @@ Full 4R is reserved for tier 3; a standard diff never fans out to multiple lense
 	}
 
 	return strings.TrimRight(prompt, "\n") + delegation
+}
+
+func migrateLegacyMandatoryWordingInDelegationHardGates(prompt string) string {
+	const (
+		startMarker = "<!-- gentle-ai:delegation-hard-gates-migration -->"
+		endMarker   = "<!-- /gentle-ai:delegation-hard-gates-migration -->"
+		heading     = "### Mandatory Delegation Triggers (Non-Skippable)"
+	)
+
+	start := strings.Index(prompt, startMarker)
+	end := -1
+	if start >= 0 {
+		if relativeEnd := strings.Index(prompt[start:], endMarker); relativeEnd >= 0 {
+			end = start + relativeEnd + len(endMarker)
+		}
+	}
+	if end < 0 {
+		start = strings.Index(prompt, heading)
+		if start < 0 {
+			return prompt
+		}
+		end = len(prompt)
+		remainder := prompt[start+len(heading):]
+		for _, nextHeading := range []string{"\n### ", "\n## ", "\n# "} {
+			if relativeEnd := strings.Index(remainder, nextHeading); relativeEnd >= 0 {
+				candidateEnd := start + len(heading) + relativeEnd
+				if candidateEnd < end {
+					end = candidateEnd
+				}
+			}
+		}
+	}
+
+	managed := strings.ReplaceAll(prompt[start:end], legacyMandatoryWording, "fully mandatory")
+	return prompt[:start] + managed + prompt[end:]
 }
 
 func ensurePreservedOpenCodeReviewExecutionContract(prompt string) string {

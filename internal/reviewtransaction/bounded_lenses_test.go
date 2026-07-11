@@ -54,7 +54,7 @@ func TestOrdinaryBoundedRecordsEachSelectedLensExactlyOnceBeforeFreeze(t *testin
 		t.Fatal(err)
 	}
 	_ = tx.StartReview()
-	if err := tx.FreezeFindings([]Finding{}, hash("0")); err == nil {
+	if err := freezeTestFindings(tx, []Finding{}); err == nil {
 		t.Fatal("FreezeFindings() accepted incomplete selected lenses")
 	}
 	for _, result := range []LensResult{
@@ -75,7 +75,7 @@ func TestOrdinaryBoundedRecordsEachSelectedLensExactlyOnceBeforeFreeze(t *testin
 			t.Fatalf("RecordLensResult(%q) accepted duplicate", lens)
 		}
 	}
-	if err := tx.FreezeFindings([]Finding{}, hash("9")); err != nil {
+	if err := freezeTestFindings(tx, []Finding{}); err != nil {
 		t.Fatalf("FreezeFindings() error = %v", err)
 	}
 }
@@ -97,10 +97,10 @@ func TestZeroLensOrdinaryBoundedRequiresExplicitEmptyLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = tx.StartReview()
-	if err := tx.FreezeFindings(nil, hash("1")); err == nil {
+	if err := tx.FreezeFindings(nil, []byte(CanonicalEmptyLedger), ""); err == nil {
 		t.Fatal("FreezeFindings(nil) accepted an implicit zero-lens ledger")
 	}
-	if err := tx.FreezeFindings([]Finding{}, hash("1")); err != nil {
+	if err := freezeTestFindings(tx, []Finding{}); err != nil {
 		t.Fatalf("FreezeFindings(explicit empty) error = %v", err)
 	}
 }
@@ -178,7 +178,7 @@ func TestStoreValidatesContentAddressedLensResultSuccessorsAndReplay(t *testing.
 	if chain.HeadRevision != completed || len(got.LensResults) != 1 || got.Counters.ReliabilityExecutions != 1 {
 		t.Fatalf("replayed chain = %#v", chain)
 	}
-	if err := tx.FreezeFindings([]Finding{}, hash("3")); err != nil {
+	if err := freezeTestFindings(tx, []Finding{}); err != nil {
 		t.Fatal(err)
 	}
 	completed, err = store.Append(completed, Record{Operation: "review/freeze-findings", Transaction: *tx})
@@ -330,7 +330,7 @@ func TestStoreRequiresExactNativeFreezeOperation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.FreezeFindings([]Finding{}, hash("2")); err != nil {
+	if err := freezeTestFindings(tx, []Finding{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Append(completed, Record{Operation: "review/complete-final-verification", Transaction: *tx}); !errors.Is(err, ErrInvalidSuccessor) {

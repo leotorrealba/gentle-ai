@@ -25,12 +25,14 @@ const (
 )
 
 type ReviewStartResult struct {
-	Schema         string                        `json:"schema"`
-	Operation      string                        `json:"operation"`
-	Target         reviewtransaction.Snapshot    `json:"target"`
-	Transaction    reviewtransaction.Transaction `json:"transaction"`
-	StoreAuthority string                        `json:"store_authority"`
-	StoreRevision  string                        `json:"store_revision,omitempty"`
+	Schema          string                        `json:"schema"`
+	Operation       string                        `json:"operation"`
+	Target          reviewtransaction.Snapshot    `json:"target"`
+	Transaction     reviewtransaction.Transaction `json:"transaction"`
+	StoreAuthority  string                        `json:"store_authority"`
+	StoreRevision   string                        `json:"store_revision,omitempty"`
+	GenesisRevision string                        `json:"genesis_revision,omitempty"`
+	ChainIdentity   string                        `json:"chain_identity,omitempty"`
 }
 
 type ReviewValidateResult struct {
@@ -127,12 +129,18 @@ type ReviewStepInput struct {
 	LensResult      *reviewtransaction.LensResult             `json:"lens_result"`
 }
 
+type reviewStepStore interface {
+	Append(string, reviewtransaction.Record) (string, error)
+	LoadChain() (reviewtransaction.ValidatedChain, error)
+}
+
 func RunReviewStep(args []string, stdout io.Writer) error {
 	flags := newReviewFlagSet("review-step", stdout, "Append one authoritative lifecycle transition.\nValid --operation values: record-lens-result, record-judge-proofs, freeze-findings, classify-evidence, apply-refuter-outcomes, begin-fix, complete-fix, validate-fix, bind-release, begin-final-verification, complete-final-verification.\nCanonical empty-ledger bytes: "+strings.TrimSuffix(canonicalEmptyReviewLedger, "\n")+`\n`)
 	cwd := flags.String("cwd", "", "repository root")
 	lineage := flags.String("lineage", "", "review lineage identifier")
 	operation := flags.String("operation", "", "lifecycle operation")
 	inputPath := flags.String("input", "", "JSON operation input")
+	ledgerPath := flags.String("ledger", "", "canonical review ledger JSON; required by freeze-findings")
 	if err := parseReviewFlags(flags, args); err != nil {
 		return err
 	}
@@ -145,6 +153,12 @@ func RunReviewStep(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(*cwd) == "" || strings.TrimSpace(*lineage) == "" || strings.TrimSpace(*operation) == "" || strings.TrimSpace(*inputPath) == "" {
 		return errors.New("review-step requires --cwd, --lineage, --operation, and --input")
 	}
+	if *operation == "freeze-findings" && strings.TrimSpace(*ledgerPath) == "" {
+		return errors.New("freeze-findings requires --ledger with the canonical ledger artifact")
+	}
+	if *operation != "freeze-findings" && strings.TrimSpace(*ledgerPath) != "" {
+		return errors.New("--ledger is only valid for freeze-findings")
+	}
 	payload, err := os.ReadFile(*inputPath)
 	if err != nil {
 		return fmt.Errorf("read review step input: %w", err)
@@ -152,6 +166,13 @@ func RunReviewStep(args []string, stdout io.Writer) error {
 	var input ReviewStepInput
 	if err := json.Unmarshal(payload, &input); err != nil {
 		return fmt.Errorf("parse review step input: %w", err)
+	}
+	var ledgerPayload []byte
+	if *operation == "freeze-findings" {
+		ledgerPayload, err = os.ReadFile(*ledgerPath)
+		if err != nil {
+			return fmt.Errorf("read canonical review ledger: %w", err)
+		}
 	}
 	store, err := reviewtransaction.AuthoritativeStore(context.Background(), *cwd, *lineage)
 	if err != nil {
@@ -171,7 +192,7 @@ func RunReviewStep(args []string, stdout io.Writer) error {
 	case "record-judge-proofs":
 		err = tx.RecordJudgeProofs(input.JudgeProofs, input.JudgeAgreement)
 	case "freeze-findings":
-		err = tx.FreezeFindings(input.Findings, input.LedgerHash)
+		err = tx.FreezeFindings(input.Findings, ledgerPayload, input.LedgerHash)
 	case "classify-evidence":
 		_, err = tx.ClassifyEvidence(input.Evidence)
 	case "apply-refuter-outcomes":
@@ -217,15 +238,28 @@ func RunReviewStep(args []string, stdout io.Writer) error {
 	if *operation == "validate-fix" {
 		operationName = "review/validate-targeted-fix"
 	}
-	revision, err := store.Append(chain.HeadRevision, reviewtransaction.Record{Operation: operationName, Transaction: tx})
+	revision, updated, err := appendAndReadBackReviewStep(store, chain.HeadRevision, reviewtransaction.Record{Operation: operationName, Transaction: tx})
 	if err != nil {
-		return fmt.Errorf("append review lifecycle operation: %w", err)
+		return err
 	}
-	result := ReviewResumeResult{Schema: ReviewResumeSchema, Operation: operationName, Target: tx.Snapshot, Transaction: tx, StoreAuthority: "repository-git-common-dir", StoreRevision: revision, GenesisRevision: chain.GenesisRevision}
-	if updated, loadErr := store.LoadChain(); loadErr == nil {
-		result.ChainIdentity = updated.Identity
-	}
+	authoritative := updated.Records[len(updated.Records)-1].Transaction
+	result := ReviewResumeResult{Schema: ReviewResumeSchema, Operation: operationName, Target: authoritative.Snapshot, Transaction: authoritative, StoreAuthority: "repository-git-common-dir", StoreRevision: revision, GenesisRevision: updated.GenesisRevision, ChainIdentity: updated.Identity}
 	return encodeReviewJSON(stdout, result)
+}
+
+func appendAndReadBackReviewStep(store reviewStepStore, expectedRevision string, record reviewtransaction.Record) (string, reviewtransaction.ValidatedChain, error) {
+	revision, err := store.Append(expectedRevision, record)
+	if err != nil {
+		return "", reviewtransaction.ValidatedChain{}, fmt.Errorf("append review lifecycle operation: %w", err)
+	}
+	chain, err := store.LoadChain()
+	if err != nil {
+		return revision, reviewtransaction.ValidatedChain{}, fmt.Errorf("read back committed review lifecycle operation at %s: %w; recover with review-resume", revision, err)
+	}
+	if chain.HeadRevision != revision {
+		return revision, reviewtransaction.ValidatedChain{}, fmt.Errorf("read back committed review lifecycle operation at %s: authoritative HEAD is %s; recover with review-resume", revision, chain.HeadRevision)
+	}
+	return revision, chain, nil
 }
 
 func (err ReviewGateDeniedError) Error() string {
@@ -324,19 +358,40 @@ func RunReviewStart(args []string, stdout io.Writer) error {
 		Schema: ReviewStartSchema, Operation: "review/start", Target: snapshot, Transaction: *transaction,
 		StoreAuthority: "repository-git-common-dir",
 	}
-	revisionValue, err := store.Append("", reviewtransaction.Record{
+	revisionValue, chain, err := appendReadBackAndMirrorReviewStart(store, reviewtransaction.Record{
 		Operation: "review/start", Transaction: *transaction,
-	})
+	}, *machineTransactionOut)
 	if err != nil {
-		return fmt.Errorf("persist review transaction: %w", err)
+		return err
 	}
+	authoritative := chain.Records[len(chain.Records)-1].Transaction
+	result.Target = authoritative.Snapshot
+	result.Transaction = authoritative
 	result.StoreRevision = revisionValue
-	if strings.TrimSpace(*machineTransactionOut) != "" {
-		if err := reviewtransaction.WriteTransactionAtomic(*machineTransactionOut, *transaction); err != nil {
-			return fmt.Errorf("write non-authoritative machine transaction output: %w", err)
+	result.GenesisRevision = chain.GenesisRevision
+	result.ChainIdentity = chain.Identity
+	return encodeReviewJSON(stdout, result)
+}
+
+func appendReadBackAndMirrorReviewStart(store reviewStepStore, record reviewtransaction.Record, machineTransactionOut string) (string, reviewtransaction.ValidatedChain, error) {
+	revision, err := store.Append("", record)
+	if err != nil {
+		return "", reviewtransaction.ValidatedChain{}, fmt.Errorf("persist review transaction: %w", err)
+	}
+	chain, err := store.LoadChain()
+	if err != nil {
+		return revision, reviewtransaction.ValidatedChain{}, fmt.Errorf("read back committed review/start at %s: %w; recover with review-resume", revision, err)
+	}
+	if chain.HeadRevision != revision {
+		return revision, reviewtransaction.ValidatedChain{}, fmt.Errorf("read back committed review/start at %s: authoritative HEAD is %s; recover with review-resume", revision, chain.HeadRevision)
+	}
+	authoritative := chain.Records[len(chain.Records)-1].Transaction
+	if strings.TrimSpace(machineTransactionOut) != "" {
+		if err := reviewtransaction.WriteTransactionAtomic(machineTransactionOut, authoritative); err != nil {
+			return revision, chain, fmt.Errorf("write non-authoritative machine transaction output: %w", err)
 		}
 	}
-	return encodeReviewJSON(stdout, result)
+	return revision, chain, nil
 }
 
 func classifyReviewSnapshot(ctx context.Context, repo string, snapshot reviewtransaction.Snapshot) (reviewtransaction.RiskLevel, error) {

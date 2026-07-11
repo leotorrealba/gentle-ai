@@ -9,6 +9,12 @@ import (
 
 const boundedReviewContractAsset = "skills/_shared/review-ledger-contract.md"
 
+const (
+	authorityFirstProcedurePlaceholder = "{{GENTLE_AI_AUTHORITY_FIRST_TERMINAL_PROCEDURE}}"
+	authorityFirstProcedureStart       = "<!-- authority-first-terminal-procedure:start -->"
+	authorityFirstProcedureEnd         = "<!-- authority-first-terminal-procedure:end -->"
+)
+
 func boundedReviewContract() string {
 	return strings.TrimSpace(assets.MustRead(boundedReviewContractAsset))
 }
@@ -19,6 +25,7 @@ func renderSDDOrchestratorAsset(agent model.AgentID) string {
 
 func renderBoundedReviewAsset(path string) string {
 	content := assets.MustRead(path)
+	content = strings.ReplaceAll(content, authorityFirstProcedurePlaceholder, authorityFirstTerminalProcedure())
 	if strings.HasSuffix(path, "/sdd-orchestrator.md") {
 		return replaceBoundedReviewSection(content, "#### Review Execution Contract", "Cost and Context Balance")
 	}
@@ -26,6 +33,17 @@ func renderBoundedReviewAsset(path string) string {
 		return replaceBoundedReviewSection(content, "## Review ledger contract", "")
 	}
 	return content
+}
+
+func authorityFirstTerminalProcedure() string {
+	contract := boundedReviewContract()
+	start := strings.Index(contract, authorityFirstProcedureStart)
+	end := strings.Index(contract, authorityFirstProcedureEnd)
+	if start < 0 || end < start {
+		return ""
+	}
+	start += len(authorityFirstProcedureStart)
+	return strings.TrimSpace(contract[start:end])
 }
 
 func replaceBoundedReviewSection(content, heading, nextHeading string) string {

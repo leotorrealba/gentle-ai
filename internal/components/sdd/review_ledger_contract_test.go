@@ -13,13 +13,16 @@ var requiredLedgerClauses = boundedReviewRequiredClauses
 
 const requiredOrchestratorMergeModeClause = "Only the parent orchestrator may launch a correction actor or scoped validator"
 
-func TestBoundedReviewLedgerSchemaIsCanonical(t *testing.T) {
+func TestBoundedReviewContractDistinguishesClaimsFromStrictNativeLedger(t *testing.T) {
 	content := boundedReviewContract()
 	for _, want := range []string{
 		"`id` | `{LENS}-{NNN}`",
 		"`evidence_class` | `deterministic | inferential | insufficient`",
 		"`proof_refs` | Concrete command, output hash, or `file:line` references",
 		"`status` | `open | corroborated | refuted | inconclusive | fixed | verified | info`",
+		"exact native `Finding` fields `id`, `lens`, `location`, `severity`, `claim`, and `proof_refs`",
+		"MUST NOT serialize `evidence_class` or `status` into the strict native ledger",
+		"Unknown native finding fields remain rejected",
 		"`approved | escalated`",
 		"`scope-changed | invalidated`",
 	} {

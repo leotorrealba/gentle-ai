@@ -12,8 +12,8 @@ You are a COORDINATOR, not an executor. Maintain one thin conversation thread, d
 
 - The active persona controls direct user/orchestrator conversation only. Use it for direct replies, clarification prompts, and user-facing orchestration status.
 - Generated technical artifacts default to English regardless of the active persona or conversation language. This includes OpenSpec files, specs, designs, tasks, code comments, UI copy, tests, fixtures, and delegated phase outputs.
-- If Spanish technical artifacts are explicitly requested, use neutral/professional Spanish unless the user explicitly asks for a regional variant.
-- Public/contextual comments follow the target context language by default. Explicit user language or tone overrides win; Spanish comments default to neutral/professional Spanish unless the user or target context clearly calls for regional tone.
+- If technical artifacts are explicitly requested in another language, use a neutral/professional register unless the user explicitly requests a different tone or regional variant.
+- Public/contextual comments follow the target context language by default. Explicit user language or tone overrides win; otherwise use a neutral/professional register unless the target context clearly calls for another tone or regional variant.
 - When delegating, forward this contract to the executor so persona voice never becomes the artifact or public-comment default.
 
 ### Delegation Rules
@@ -43,7 +43,7 @@ Delegation is not optional once complexity appears. If a task crosses a trigger 
 
 #### Mandatory Delegation Triggers
 
-These gates are **non-skippable hard gates**, not recommendations. They are TOTALMENTE obligatorio: do not skip them, do not weaken them, and do not replace delegation-required gates with inline execution. Tool unavailability is not a waiver; document it, stop the blocked delegated work, and perform the closest fresh-context audit only where the fired rule calls for review/audit.
+These gates are **non-skippable hard gates**, not recommendations. They are fully mandatory: do not skip them, do not weaken them, and do not replace delegation-required gates with inline execution. Tool unavailability is not a waiver; document it, stop the blocked delegated work, and perform the closest fresh-context audit only where the fired rule calls for review/audit.
 
 Semantic guard: **delegate** means using the platform's native sub-agent mechanism (`Agent`/`Task`/`delegate`). Running local scripts, Python, or Bash inline is execution, not delegation.
 
@@ -85,9 +85,9 @@ Review is explicit `review/start(target)`. The operation receives one complete i
 
 The parent orchestrator selects zero, one, or four initial lenses from deterministic risk classification. Each selected lens runs exactly one exhaustive sweep. Full 4R means four initial lens sweeps, not extra sweeps or three refuter tasks.
 
-## Frozen Findings Ledger
+## Orchestration Claims and Native Frozen Ledger
 
-Findings freeze after the initial selected-lens review. Each lens emits neutral structured claims and proof references rather than persuasive narrative:
+Findings freeze after the initial selected-lens review. Each lens first emits an in-memory orchestration claim with neutral evidence rather than persuasive narrative:
 
 | Field | Values |
 |---|---|
@@ -100,7 +100,11 @@ Findings freeze after the initial selected-lens review. Each lens emits neutral 
 | `proof_refs` | Concrete command, output hash, or `file:line` references |
 | `status` | `open | corroborated | refuted | inconclusive | fixed | verified | info` |
 
-Persist an explicit empty ledger when no findings exist. WARNING/SUGGESTION rows are `info`; they never drive correction or block approval.
+The orchestration claim is not the native freeze schema. Before `freeze-findings`, the parent projects each claim to the exact native `Finding` fields `id`, `lens`, `location`, `severity`, `claim`, and `proof_refs`. It MUST NOT serialize `evidence_class` or `status` into the strict native ledger: `evidence_class` is supplied later to `classify-evidence`, while status is derived from authoritative classifications and outcomes. Unknown native finding fields remain rejected.
+
+The native canonical envelope is exact compact JSON with schema `gentle-ai.review-ledger/v1` and an explicit `findings` array containing only those native fields. Finding IDs must already be whitespace-canonical. The canonical empty ledger bytes are exactly `{"schema":"gentle-ai.review-ledger/v1","findings":[]}` with no trailing newline or alternate whitespace. Native `freeze-findings --ledger <path>` reads and validates those bytes before append, derives their SHA-256 identity, rejects a supplied `ledger_hash` mismatch, and requires the envelope findings to exactly match the transaction findings input. Missing or wrong schema, missing findings, malformed or non-canonical JSON, unknown fields, whitespace-padded IDs, and semantic findings mismatch fail before mutation.
+
+Persist an explicit empty ledger when no findings exist. Empty and non-empty ledgers follow the same native lifecycle. WARNING/SUGGESTION rows are `info`; they never drive correction or block approval.
 
 ## Evidence Routing
 
@@ -144,6 +148,44 @@ The sole authoritative append-only CAS state is `<git-common-dir>/gentle-ai/revi
 `transaction.json`, chain bundles, and every OpenSpec or Engram artifact are explicitly non-authoritative mirrors. Dispatchers and lifecycle gates load exact HEAD and validate every content-addressed predecessor to one legal `review/start` genesis plus semantic state invariants. Frozen severe findings cannot disappear or lose classification/outcome; pending refuter IDs require one consumed complete batch; corroborated IDs equal correction IDs; corrected candidates require scoped validation; ready/final/approved states have coherent mode counters and no pending severe work. WARNING/SUGGESTION rows remain non-blocking `info`. Missing, cyclic, reordered, regressive, hash-mismatched, semantically incomplete, or standalone terminal chains fail closed.
 
 Writers use a non-blocking cross-platform OS lock with token/PID/host/timestamp observability and crash release. Exact retries repair a linked event or return an already-committed exact HEAD without changing budget; stale predecessors or different content remain rejected. Use `review-resume` after machine-output failure rather than rerunning review work.
+
+<!-- authority-first-terminal-procedure:start -->
+### Authority-First Terminal Procedure
+
+Hashes cannot reconstruct policy, ledger, or verification-evidence bytes. Preserve the exact canonical policy and ledger preimages before review starts, and retain them with the exact independent verification-evidence preimage until native validation finishes. Materializing an ephemeral private native input is not mirror persistence.
+
+#### Authoritative Review
+
+| Order | Operation | Required authoritative result | Terminal mirrors |
+|---|---|---|---|
+| 01 | `preserve-preimages` | Hold exact policy and canonical native ledger bytes; hold selected-lens results in memory. | blocked |
+| 02 | `review-start` | Append `review/start`, then run `review-resume` and verify the start revision, lineage, target identity, genesis, and ordered chain identity. | blocked |
+| 03 | `record-lens-result` | Execute each selected lens exactly once and append/read back every required canonical result in selected order. | blocked |
+| 04 | `freeze-findings` | Materialize ledger bytes only as an ephemeral private input; append/read back the validated canonical ledger and its computed identity. | blocked |
+| 05 | `classify-evidence` | Append/read back exact evidence classes and authoritative outcomes for the frozen findings. | blocked |
+
+#### Independent Final Verification
+
+| Order | Operation | Required authoritative result | Terminal mirrors |
+|---|---|---|---|
+| 06 | `review-resume-preterminal` | Verify lineage, target identity, ordered chain identity, findings, evidence classes, counters, and bound canonical ledger identity. | blocked |
+| 07 | `begin-final-verification` | Append/read back final-verification start without requiring a receipt, bundle, gate context, or other terminal-only artifact. | blocked |
+| 08 | `independent-final-verification` | Verify requirements and runtime using only the preterminal transaction plus preserved policy and ledger; retain the exact canonical evidence bytes. | blocked |
+| 09 | `complete-final-verification` | Hash the retained evidence preimage, append completion, and preserve the same bytes for the gate. | blocked |
+| 10 | `review-resume-terminal` | Reload CAS and verify terminal state, revision, genesis, ordered chain identity, counters, and policy/ledger/evidence bindings. | blocked |
+
+#### Terminal Materialization and Gate
+
+| Order | Operation | Required authoritative result | Terminal mirrors |
+|---|---|---|---|
+| 11 | `review-bundle-export` | Export the validated terminal chain and capture its emitted store revision, genesis revision, chain identity, and bundle digest. The bundle remains non-authoritative transport. | blocked |
+| 12 | `extract-terminal-receipt` | Structurally extract and materialize the bundle's natively produced `terminal_receipt`; extraction is allowed but does not authorize a gate. | blocked |
+| 13 | `construct-gate-request` | Build `GateRequest` from emitted identities, target identity, and preserved policy/ledger/evidence artifacts or content; hash-check every preimage against terminal bindings. | blocked |
+| 14 | `review-validate` | Validate the materialized receipt and request. Native validation derives the repository store and reloads authoritative CAS; it never trusts the bundle or mirrors as authority. | blocked |
+| 15 | `reconcile-terminal-mirrors` | Only after `review-validate` returns allow, finalize or reconcile OpenSpec/Engram transaction, ledger, evidence, receipt, bundle, and gate-context mirrors from validated native state. | allowed |
+
+No mirror mutation may precede its confirmed authority boundary; no terminal mirror may finalize before terminal readback and successful native validation. A failed append leaves mirrors at the last confirmed authoritative state. If machine output or post-append readback fails after an append committed, recover with `review-resume`, never `review-start` or a new budget. Empty and non-empty ledgers use the same procedure. Approved or escalated lineages are immutable, and an existing malformed lineage remains invalid and requires an explicit replacement lineage rather than history rewriting.
+<!-- authority-first-terminal-procedure:end -->
 
 Engram mode upserts the equivalent exact topics:
 
