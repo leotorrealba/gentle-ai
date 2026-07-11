@@ -329,7 +329,8 @@ func validateSuccessor(previous, next Transaction, operation string) error {
 	freezeTransition := (previous.State == StateReviewing || previous.State == StateJudgesConfirmed) && next.State == StateFindingsFrozen
 	if freezeTransition {
 		expected := previous
-		if operation != "review/freeze-findings" || expected.FreezeFindings(next.Findings, next.LedgerHash) != nil || !transactionsEqual(expected, next) {
+		ledger, err := CanonicalLedger(next.Findings)
+		if operation != "review/freeze-findings" || err != nil || expected.FreezeFindings(next.Findings, ledger, next.LedgerHash) != nil || !transactionsEqual(expected, next) {
 			return fmt.Errorf("%w: findings freeze must replay the exact native transition", ErrInvalidSuccessor)
 		}
 	}

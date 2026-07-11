@@ -52,7 +52,7 @@ func TestStoreAppendRepairsInterruptedEventAndIsIdempotentAtHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = tx.FreezeFindings([]Finding{}, hash("1"))
+	_ = freezeTestFindings(tx, []Finding{})
 	record := Record{Operation: "review/freeze-findings", Transaction: *tx}
 	linked := record
 	linked.Schema = RecordSchema
@@ -193,7 +193,7 @@ func TestStoreRejectsRegressiveOrUnrelatedSuccessorAtCurrentRevision(t *testing.
 	if err != nil {
 		t.Fatalf("Append(start) error = %v", err)
 	}
-	if err := tx.FreezeFindings([]Finding{{ID: "R1-001", Severity: "CRITICAL"}}, hash("1")); err != nil {
+	if err := freezeTestFindings(tx, []Finding{{ID: "R1-001", Severity: "CRITICAL"}}); err != nil {
 		t.Fatal(err)
 	}
 	second, err := store.Append(first, Record{Operation: "review/freeze-findings", Transaction: *tx})
@@ -230,7 +230,7 @@ func TestStoreRejectsCounterAndOutcomeRegression(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = tx.FreezeFindings([]Finding{{ID: "R1-001", Severity: "CRITICAL"}}, hash("1"))
+	_ = freezeTestFindings(tx, []Finding{{ID: "R1-001", Severity: "CRITICAL"}})
 	second, err := store.Append(first, Record{Operation: "review/freeze-findings", Transaction: *tx})
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +255,7 @@ func TestValidateSuccessorEnforcesReleaseBindingTimingAndImmutability(t *testing
 	if err := ready.StartReview(); err != nil {
 		t.Fatal(err)
 	}
-	if err := ready.FreezeFindings([]Finding{}, hash("1")); err != nil {
+	if err := freezeTestFindings(ready, []Finding{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ready.ClassifyEvidence([]FindingEvidence{}); err != nil {
@@ -358,7 +358,7 @@ func TestValidateSuccessorAllowsReleaseBindAfterJSONNormalizesEmptyCollections(t
 	if err := previous.StartReview(); err != nil {
 		t.Fatal(err)
 	}
-	if err := previous.FreezeFindings([]Finding{}, hash("1")); err != nil {
+	if err := freezeTestFindings(previous, []Finding{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := previous.ClassifyEvidence([]FindingEvidence{}); err != nil {
@@ -383,7 +383,7 @@ func TestStoreLoadRejectsIncompleteAndIllegalPredecessorChains(t *testing.T) {
 		t.Fatal(err)
 	}
 	frozen := *reviewing
-	if err := frozen.FreezeFindings([]Finding{}, hash("1")); err != nil {
+	if err := freezeTestFindings(&frozen, []Finding{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -458,10 +458,10 @@ func TestStoreLoadRejectsHashValidSemanticFindingBypasses(t *testing.T) {
 				tx := newTestTransaction(t, ModeOrdinary4R)
 				_ = tx.StartReview()
 				genesis := writeStoreEvent(t, store, Record{Operation: "review/start", Transaction: *tx})
-				_ = tx.FreezeFindings([]Finding{
+				_ = freezeTestFindings(tx, []Finding{
 					{ID: "R1-001", Severity: "CRITICAL"},
 					{ID: "R1-I01", Severity: "WARNING"},
-				}, hash("1"))
+				})
 				frozen := writeStoreEvent(t, store, Record{Operation: "review/freeze-findings", PreviousRevision: genesis, Transaction: *tx})
 				forged := *tx
 				forged.State = StateReadyFinalVerification
@@ -475,7 +475,7 @@ func TestStoreLoadRejectsHashValidSemanticFindingBypasses(t *testing.T) {
 				tx := newTestTransaction(t, ModeOrdinary4R)
 				_ = tx.StartReview()
 				genesis := writeStoreEvent(t, store, Record{Operation: "review/start", Transaction: *tx})
-				_ = tx.FreezeFindings([]Finding{{ID: "R1-001", Severity: "CRITICAL"}}, hash("1"))
+				_ = freezeTestFindings(tx, []Finding{{ID: "R1-001", Severity: "CRITICAL"}})
 				frozen := writeStoreEvent(t, store, Record{Operation: "review/freeze-findings", PreviousRevision: genesis, Transaction: *tx})
 				_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-001", Class: EvidenceInferential, Proof: "concurrency trace"}})
 				classified := writeStoreEvent(t, store, Record{Operation: "review/classify", PreviousRevision: frozen, Transaction: *tx})
@@ -495,6 +495,27 @@ func TestStoreLoadRejectsHashValidSemanticFindingBypasses(t *testing.T) {
 				t.Fatal("Load() accepted a hash-valid chain that bypassed severe finding resolution")
 			}
 		})
+	}
+}
+
+func TestStoreLoadChainRejectsForgedFreezeLedgerHashUnboundToCanonicalLedger(t *testing.T) {
+	store := Store{Dir: filepath.Join(t.TempDir(), "review-store")}
+	tx := newTestTransaction(t, ModeOrdinary4R)
+	if err := tx.StartReview(); err != nil {
+		t.Fatal(err)
+	}
+	genesis := writeStoreEvent(t, store, Record{Operation: "review/start", Transaction: *tx})
+	if err := freezeTestFindings(tx, []Finding{{ID: "R1-001", Severity: "CRITICAL"}}); err != nil {
+		t.Fatal(err)
+	}
+	forged := *tx
+	forged.LedgerHash = hash("d")
+	if forged.LedgerHash == tx.LedgerHash {
+		t.Fatal("forged ledger hash accidentally equals the canonical ledger hash")
+	}
+	writeStoreEvent(t, store, Record{Operation: "review/freeze-findings", PreviousRevision: genesis, Transaction: forged})
+	if _, err := store.LoadChain(); !errors.Is(err, ErrInvalidSuccessor) {
+		t.Fatalf("LoadChain() error = %v, want ErrInvalidSuccessor", err)
 	}
 }
 
@@ -596,7 +617,7 @@ func TestStoreLoadChainBindsGenesisHeadAndOrderedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.FreezeFindings([]Finding{}, hash("1")); err != nil {
+	if err := freezeTestFindings(tx, []Finding{}); err != nil {
 		t.Fatal(err)
 	}
 	head, err := store.Append(genesis, Record{Operation: "review/freeze-findings", Transaction: *tx})
@@ -638,7 +659,7 @@ func approvedStoreTransaction(t *testing.T, lineage string) Transaction {
 	if err := tx.StartReview(); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.FreezeFindings([]Finding{}, hash("1")); err != nil {
+	if err := freezeTestFindings(tx, []Finding{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.ClassifyEvidence([]FindingEvidence{}); err != nil {

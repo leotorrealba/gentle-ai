@@ -72,7 +72,7 @@ func TestResolveArchiveRequiresApprovedExactReviewReceipt(t *testing.T) {
 		{
 			name: "stale ledger invalidates archive",
 			mutate: func(t *testing.T, changeRoot string, _ reviewtransaction.Receipt, _ reviewtransaction.GateRequest) {
-				write(t, filepath.Join(changeRoot, "reviews", "ledger.json"), "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[{\"id\":\"stale\"}]}\n")
+				write(t, filepath.Join(changeRoot, "reviews", "ledger.json"), "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[{\"id\":\"stale\"}]}")
 			},
 			wantGate: reviewtransaction.GateInvalidated, wantArchive: DependencyBlocked,
 			wantNext: "resolve-review", wantReason: "invalidated",
@@ -322,10 +322,13 @@ func TestResolveStartsBoundedReviewBeforeFinalVerification(t *testing.T) {
 		t.Fatalf("without transaction verify=%q next=%q, want blocked/review", status.Dependencies.Verify, status.NextRecommended)
 	}
 	dispatcher := RenderDispatcherMarkdown(status)
-	for _, want := range []string{"### Next Review Operation", "gentle-ai review-start", "--intended-untracked-manifest"} {
+	for _, want := range []string{"### Next Review Operation", "gentle-ai review-start", "--intended-untracked-manifest", "reconcile-terminal-mirrors", "review-validate"} {
 		if !strings.Contains(dispatcher, want) {
 			t.Fatalf("dispatcher missing %q:\n%s", want, dispatcher)
 		}
+	}
+	if strings.Contains(dispatcher, "--machine-transaction-out") {
+		t.Fatalf("dispatcher routes a mirror write before the authoritative append:\n%s", dispatcher)
 	}
 
 	tx, err := reviewtransaction.NewTransaction(reviewtransaction.Start{
@@ -342,7 +345,7 @@ func TestResolveStartsBoundedReviewBeforeFinalVerification(t *testing.T) {
 	if err := tx.StartReview(); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.FreezeFindings([]reviewtransaction.Finding{}, shaID("6")); err != nil {
+	if err := freezeStatusFindings(tx, []reviewtransaction.Finding{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.ClassifyEvidence([]reviewtransaction.FindingEvidence{}); err != nil {
@@ -424,7 +427,7 @@ func writeApprovedReviewArtifacts(t *testing.T, changeRoot string) {
 	ledgerPath := filepath.Join(reviewsDir, "ledger.json")
 	verifyPath := filepath.Join(changeRoot, "verify-report.md")
 	write(t, policyPath, "bounded archive policy\n")
-	write(t, ledgerPath, "{\"schema\":\"gentle-ai.review-ledger/v1\",\"findings\":[]}\n")
+	write(t, ledgerPath, reviewtransaction.CanonicalEmptyLedger)
 	policyHash, err := reviewtransaction.HashArtifact(policyPath)
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +458,11 @@ func writeApprovedReviewArtifacts(t *testing.T, changeRoot string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.FreezeFindings([]reviewtransaction.Finding{}, ledgerHash); err != nil {
+	ledger, err := reviewtransaction.CanonicalLedger([]reviewtransaction.Finding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.FreezeFindings([]reviewtransaction.Finding{}, ledger, ledgerHash); err != nil {
 		t.Fatal(err)
 	}
 	revision, err = store.Append(revision, reviewtransaction.Record{Operation: "review/freeze-findings", Transaction: *tx})
@@ -541,7 +548,7 @@ func remediationTransaction(t *testing.T, revision string, ready bool) reviewtra
 		t.Fatalf("NewTransaction() error = %v", err)
 	}
 	_ = tx.StartReview()
-	_ = tx.FreezeFindings([]reviewtransaction.Finding{{ID: "R1-001", Severity: "CRITICAL"}}, shaID("6"))
+	_ = freezeStatusFindings(tx, []reviewtransaction.Finding{{ID: "R1-001", Severity: "CRITICAL"}})
 	_, _ = tx.ClassifyEvidence([]reviewtransaction.FindingEvidence{{FindingID: "R1-001", Class: reviewtransaction.EvidenceDeterministic, Proof: "failing focused test"}})
 	if err := tx.BeginFix(revision); err != nil {
 		t.Fatalf("BeginFix() error = %v", err)
@@ -593,4 +600,12 @@ func writeJSON(t *testing.T, path string, value any) {
 
 func shaID(char string) string {
 	return fmt.Sprintf("sha256:%s", strings.Repeat(char, 64))
+}
+
+func freezeStatusFindings(tx *reviewtransaction.Transaction, findings []reviewtransaction.Finding) error {
+	ledger, err := reviewtransaction.CanonicalLedger(findings)
+	if err != nil {
+		return err
+	}
+	return tx.FreezeFindings(findings, ledger, "")
 }

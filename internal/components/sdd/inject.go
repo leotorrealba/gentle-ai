@@ -407,7 +407,7 @@ func Inject(homeDir string, adapter agents.Adapter, sddMode model.SDDModeID, opt
 					continue
 				}
 
-				content := assets.MustRead(commandsAssetDir + "/" + entry.Name())
+				content := renderBoundedReviewAsset(commandsAssetDir + "/" + entry.Name())
 				path := filepath.Join(commandsDir, entry.Name())
 				writeResult, err := filemerge.WriteFileAtomic(path, []byte(content), 0o644)
 				if err != nil {

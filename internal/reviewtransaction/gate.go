@@ -319,19 +319,7 @@ func hashLedgerArtifactBinding(path string) (string, string, error) {
 }
 
 func hashLedgerPayload(payload []byte) (string, string, error) {
-	var envelope struct {
-		Schema   string    `json:"schema"`
-		Findings []Finding `json:"findings"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	if err := decoder.Decode(&envelope); err != nil {
-		return "", "", err
-	}
-	if envelope.Schema != "gentle-ai.review-ledger/v1" || envelope.Findings == nil {
-		return "", "", errors.New("ledger requires gentle-ai.review-ledger/v1 and an explicit findings array")
-	}
-	sum := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(sum[:]), findingsHash(envelope.Findings), nil
+	return validateCanonicalLedger(payload, nil, "")
 }
 
 func HashLedgerArtifact(path string) (string, error) {

@@ -349,7 +349,7 @@ func (transaction *Transaction) RecordJudgeProofs(proofs []JudgeProof, agreement
 	return nil
 }
 
-func (transaction *Transaction) FreezeFindings(findings []Finding, ledgerHash string) error {
+func (transaction *Transaction) FreezeFindings(findings []Finding, ledger []byte, suppliedLedgerHash string) error {
 	expectedState := StateReviewing
 	if transaction.Mode == ModeJudgmentDay {
 		expectedState = StateJudgesConfirmed
@@ -357,25 +357,29 @@ func (transaction *Transaction) FreezeFindings(findings []Finding, ledgerHash st
 	if transaction.State != expectedState {
 		return transaction.invalidTransition("freeze findings")
 	}
+	if findings == nil {
+		return errors.New("freeze findings requires an explicit findings array")
+	}
+	validated := make([]Finding, len(findings))
+	for index, finding := range findings {
+		finding.ID = strings.TrimSpace(finding.ID)
+		validated[index] = finding
+	}
+	ledgerHash, ledgerFindingsHash, err := validateCanonicalLedger(ledger, validated, suppliedLedgerHash)
+	if err != nil {
+		return err
+	}
 	if transaction.Mode == ModeOrdinaryBounded {
 		if len(transaction.LensResults) != len(transaction.SelectedLenses) {
 			return errors.New("cannot freeze findings before every selected lens has one complete result")
-		}
-		if len(transaction.SelectedLenses) == 0 && findings == nil {
-			return errors.New("zero-lens review requires an explicit empty findings ledger")
 		}
 		if !reflectLensFindings(transaction.LensResults, findings) {
 			return errors.New("frozen findings must exactly match the completed native lens results")
 		}
 	}
-	if !validSHA256(ledgerHash) {
-		return errors.New("ledger_hash must be a lowercase SHA-256 identity")
-	}
 	seen := map[string]struct{}{}
-	validated := make([]Finding, len(findings))
 	infoOutcomes := make(map[string]EvidenceOutcome)
-	for index, finding := range findings {
-		finding.ID = strings.TrimSpace(finding.ID)
+	for _, finding := range validated {
 		if finding.ID == "" {
 			return errors.New("finding id is required")
 		}
@@ -386,7 +390,6 @@ func (transaction *Transaction) FreezeFindings(findings []Finding, ledgerHash st
 		if !isSupportedSeverity(finding.Severity) {
 			return fmt.Errorf("finding %q has unsupported severity %q", finding.ID, finding.Severity)
 		}
-		validated[index] = finding
 		if !isSevereSeverity(finding.Severity) {
 			infoOutcomes[finding.ID] = OutcomeInfo
 		}
@@ -396,7 +399,7 @@ func (transaction *Transaction) FreezeFindings(findings []Finding, ledgerHash st
 		transaction.Outcomes[id] = outcome
 	}
 	transaction.LedgerHash = ledgerHash
-	transaction.LedgerFindingsHash = findingsHash(validated)
+	transaction.LedgerFindingsHash = ledgerFindingsHash
 	transaction.State = StateFindingsFrozen
 	return nil
 }

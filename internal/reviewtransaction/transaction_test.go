@@ -11,7 +11,7 @@ func TestOrdinaryTransactionIsOneBoundedNonIterativeFlow(t *testing.T) {
 	if err := tx.StartReview(); err != nil {
 		t.Fatalf("StartReview() error = %v", err)
 	}
-	if err := tx.FreezeFindings([]Finding{{ID: "R1-DET", Severity: "CRITICAL"}, {ID: "R2-INF", Severity: "CRITICAL"}}, hash("1")); err != nil {
+	if err := freezeTestFindings(tx, []Finding{{ID: "R1-DET", Severity: "CRITICAL"}, {ID: "R2-INF", Severity: "CRITICAL"}}); err != nil {
 		t.Fatalf("FreezeFindings() error = %v", err)
 	}
 
@@ -110,7 +110,7 @@ func TestJudgmentDayCarriesEarlierSevereFixCausedFindingIntoNextCorrection(t *te
 	tx := newTestTransaction(t, ModeJudgmentDay)
 	_ = tx.StartReview()
 	_ = tx.RecordJudgeProofs([]JudgeProof{{JudgeID: "a", ExecutionHash: hash("1"), ResultHash: hash("2"), Blind: true, Confirmed: true}, {JudgeID: "b", ExecutionHash: hash("3"), ResultHash: hash("4"), Blind: true, Confirmed: true}}, hash("5"))
-	_ = tx.FreezeFindings([]Finding{{ID: "JD-001", Severity: "CRITICAL"}}, hash("6"))
+	_ = freezeTestFindings(tx, []Finding{{ID: "JD-001", Severity: "CRITICAL"}})
 	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "JD-001", Class: EvidenceDeterministic, Proof: "reproduced"}})
 	_ = tx.BeginFix(hash("7"))
 	fix := tx.Snapshot
@@ -127,7 +127,7 @@ func TestJudgmentDayCarriesEarlierSevereFixCausedFindingIntoNextCorrection(t *te
 func TestFrozenLedgerFindingsHashDetectsTamperedFrozenFindings(t *testing.T) {
 	tx := newTestTransaction(t, ModeOrdinary4R)
 	_ = tx.StartReview()
-	_ = tx.FreezeFindings([]Finding{{ID: "R1-001", Severity: "CRITICAL"}}, hash("1"))
+	_ = freezeTestFindings(tx, []Finding{{ID: "R1-001", Severity: "CRITICAL"}})
 	tx.Findings[0].Severity = "WARNING"
 	if _, err := ParseTransaction(mustMarshalTransaction(t, *tx)); err == nil {
 		t.Fatal("ParseTransaction() accepted frozen findings that no longer match their ledger binding")
@@ -156,7 +156,7 @@ func mustMarshalTransaction(t *testing.T, transaction Transaction) []byte {
 func TestInsufficientEvidenceIsInconclusiveAndNeverAutoFixed(t *testing.T) {
 	tx := newTestTransaction(t, ModeOrdinary4R)
 	_ = tx.StartReview()
-	_ = tx.FreezeFindings([]Finding{{ID: "R3-INS", Severity: "CRITICAL"}}, hash("1"))
+	_ = freezeTestFindings(tx, []Finding{{ID: "R3-INS", Severity: "CRITICAL"}})
 	route, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R3-INS", Class: EvidenceInsufficient, Proof: "no observable behavior"}})
 	if err != nil {
 		t.Fatalf("ClassifyEvidence() error = %v", err)
@@ -186,10 +186,10 @@ func TestMalformedRefuterBatchIsConsumedAndTerminal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tx := newTestTransaction(t, ModeOrdinary4R)
 			_ = tx.StartReview()
-			_ = tx.FreezeFindings([]Finding{
+			_ = freezeTestFindings(tx, []Finding{
 				{ID: "R2-INF", Severity: "CRITICAL"},
 				{ID: "R3-INF", Severity: "BLOCKER"},
-			}, hash("1"))
+			})
 			_, _ = tx.ClassifyEvidence([]FindingEvidence{
 				{FindingID: "R2-INF", Class: EvidenceInferential, Proof: "race requires interpretation"},
 				{FindingID: "R3-INF", Class: EvidenceInferential, Proof: "ordering requires interpretation"},
@@ -225,7 +225,7 @@ func TestOnlySevereFindingsEnterEvidenceRouting(t *testing.T) {
 		{ID: "R3-WARNING", Severity: "WARNING"},
 		{ID: "R4-SUGGESTION", Severity: "SUGGESTION"},
 	}
-	if err := tx.FreezeFindings(findings, hash("1")); err != nil {
+	if err := freezeTestFindings(tx, findings); err != nil {
 		t.Fatalf("FreezeFindings() error = %v", err)
 	}
 	route, err := tx.ClassifyEvidence([]FindingEvidence{
@@ -268,7 +268,7 @@ func TestJudgmentDayRequiresTwoDistinctBlindJudgeProofs(t *testing.T) {
 					t.Fatal("RecordJudgeProofs() accepted incomplete or duplicate judge proof")
 				}
 			}
-			if err := tx.FreezeFindings([]Finding{{ID: "JD-001", Severity: "CRITICAL"}}, hash("6")); err == nil {
+			if err := freezeTestFindings(tx, []Finding{{ID: "JD-001", Severity: "CRITICAL"}}); err == nil {
 				t.Fatal("FreezeFindings() accepted Judgment Day without two confirmed judges")
 			}
 		})
@@ -279,7 +279,7 @@ func TestJudgmentDayRequiresTwoDistinctBlindJudgeProofs(t *testing.T) {
 	if err := tx.RecordJudgeProofs([]JudgeProof{proofA, proofB}, hash("5")); err != nil {
 		t.Fatalf("RecordJudgeProofs(valid) error = %v", err)
 	}
-	if err := tx.FreezeFindings([]Finding{{ID: "JD-001", Severity: "CRITICAL"}}, hash("6")); err != nil {
+	if err := freezeTestFindings(tx, []Finding{{ID: "JD-001", Severity: "CRITICAL"}}); err != nil {
 		t.Fatalf("FreezeFindings(valid proof) error = %v", err)
 	}
 	if tx.Counters.JudgeExecutions != 2 || tx.JudgeProofHash == "" {
@@ -296,7 +296,7 @@ func TestJudgmentDayHasExactlyTwoFixAndScopedRejudgmentRounds(t *testing.T) {
 	}, hash("e")); err != nil {
 		t.Fatal(err)
 	}
-	_ = tx.FreezeFindings([]Finding{{ID: "JD-001", Severity: "CRITICAL"}}, hash("1"))
+	_ = freezeTestFindings(tx, []Finding{{ID: "JD-001", Severity: "CRITICAL"}})
 	if _, err := tx.ClassifyEvidence([]FindingEvidence{{FindingID: "JD-001", Class: EvidenceDeterministic, Proof: "confirmed by both judges"}}); err != nil {
 		t.Fatalf("ClassifyEvidence() error = %v", err)
 	}
@@ -448,7 +448,7 @@ func TestMultipleFrozenFindingsShareOneFixBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	findings := []Finding{{ID: "R1-001", Severity: "CRITICAL"}, {ID: "R1-002", Severity: "CRITICAL"}, {ID: "R1-003", Severity: "CRITICAL"}}
-	if err := tx.FreezeFindings(findings, hash("1")); err != nil {
+	if err := freezeTestFindings(tx, findings); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.ClassifyEvidence([]FindingEvidence{
@@ -499,7 +499,7 @@ func ordinaryAtFixing(t *testing.T) *Transaction {
 	t.Helper()
 	tx := newTestTransaction(t, ModeOrdinary4R)
 	_ = tx.StartReview()
-	_ = tx.FreezeFindings([]Finding{{ID: "R1-DET", Severity: "CRITICAL"}}, hash("1"))
+	_ = freezeTestFindings(tx, []Finding{{ID: "R1-DET", Severity: "CRITICAL"}})
 	_, _ = tx.ClassifyEvidence([]FindingEvidence{{FindingID: "R1-DET", Class: EvidenceDeterministic, Proof: "failing test"}})
 	_ = tx.BeginFix(hash("2"))
 	return tx
@@ -524,6 +524,14 @@ func newTestTransaction(t *testing.T, mode Mode) *Transaction {
 
 func hash(char string) string {
 	return "sha256:" + strings.Repeat(char, 64)
+}
+
+func freezeTestFindings(tx *Transaction, findings []Finding) error {
+	ledger, err := CanonicalLedger(findings)
+	if err != nil {
+		return err
+	}
+	return tx.FreezeFindings(findings, ledger, "")
 }
 
 func tree(char string) string {

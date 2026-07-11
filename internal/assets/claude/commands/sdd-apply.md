@@ -48,4 +48,8 @@ For each task:
 Return a structured result with: status, executive_summary, detailed_report (files changed), artifacts, and next_recommended.
 
 POST-APPLY REVIEW ROUTING:
-Return control to the parent orchestrator. If native status reports `nextRecommended: review`, the parent—not the apply executor—builds the explicit intended-untracked manifest and runs `gentle-ai review-start ... --cwd <repo> --lineage <id> --machine-transaction-out <changeRoot>/reviews/transaction.json`. The repository Git common directory plus canonical lineage ID determines the authoritative CAS store; `transaction.json` is non-authoritative machine output. Reuse a valid receipt; never auto-launch Judgment Day or create another budget at commit/push/PR/release.
+Return control to the parent orchestrator. If native status reports `nextRecommended: review`, the parent—not the apply executor—builds the explicit intended-untracked manifest and runs `gentle-ai review-start ... --cwd <repo> --lineage <id>`. The repository Git common directory plus canonical lineage ID determines the authoritative CAS store.
+
+{{GENTLE_AI_AUTHORITY_FIRST_TERMINAL_PROCEDURE}}
+
+Reuse a valid receipt; never auto-launch Judgment Day or create another budget at commit/push/PR/release.
