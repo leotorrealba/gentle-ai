@@ -73,12 +73,25 @@ func TestRenderedReviewersAreReadOnlyAndSingleResult(t *testing.T) {
 			path := family + "/agents/review-" + lens + ".md"
 			t.Run(family+"/"+lens, func(t *testing.T) {
 				content := renderBoundedReviewAsset(path)
-				for _, want := range []string{"read-only reviewer", "immutable candidate diff once", "## Candidate-Causal Admission", "Return one JSON object and no prose"} {
+				for _, want := range []string{"read-only reviewer", "immutable candidate diff once", "## Candidate-Causal Admission", "Return one JSON object and no prose", nativeReviewerResultSchema, "Never emit summary, skill_resolution, or any other unknown field", "evidence contains only genuine inspection evidence"} {
 					if !strings.Contains(content, want) {
 						t.Errorf("%s missing %q", path, want)
 					}
 				}
 			})
+		}
+	}
+}
+
+func TestJudgmentDayReviewersUseNativeResultSchema(t *testing.T) {
+	for name, content := range map[string]string{
+		"rendered contract": judgmentDayReviewerContract(),
+		"skill reference":   assets.MustRead("skills/judgment-day/references/prompts-and-formats.md"),
+	} {
+		for _, want := range []string{nativeReviewerResultSchema, "Never emit", "skill_resolution", "unknown field", "orchestration metadata outside the native result JSON", `{"findings":[],"evidence":["what was inspected"]}`} {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s missing %q", name, want)
+			}
 		}
 	}
 }

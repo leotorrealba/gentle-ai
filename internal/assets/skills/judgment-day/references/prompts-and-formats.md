@@ -9,9 +9,13 @@ Target: {immutable target identity and exact paths}
 Skills to load: {resolved SKILL.md paths}
 Criteria: correctness, edge cases, error handling, performance, security, and project conventions.
 
-Run one exhaustive read-only sweep. Return neutral structured claims with id, location, severity, claim, evidence_class, and concrete proof_refs. Do not edit, delegate, refute, or inspect unrelated scope. Return one result and terminate. If scoped re-judging, read ONLY the frozen ledger and immutable fix delta; record any fix-caused defect with proof.
+Run one exhaustive read-only sweep. Do not edit, delegate, refute, or inspect unrelated scope. If scoped re-judging, read ONLY the frozen ledger and immutable fix delta; record any fix-caused defect with proof.
 
-End with: Skill Resolution: {paths-injected|fallback-registry|fallback-path|none} — {details}
+Return one JSON object and no prose, using exactly this native result shape:
+
+{"findings":[{"location":"path:line","severity":"CRITICAL","claim":"observable incorrect behavior","evidence_class":"deterministic","causal_disposition":"introduced","proof_refs":["concrete proof"]}],"evidence":["what was inspected"]}
+
+The only allowed top-level fields are `findings` and `evidence`, and the only allowed finding fields are `location`, `severity`, `claim`, `evidence_class`, `causal_disposition`, and `proof_refs`. Never emit `summary`, `skill_resolution`, or any other unknown field. Keep orchestration metadata outside the native result JSON; `evidence` contains only genuine inspection evidence. Return `{"findings":[],"evidence":["what was inspected"]}` when clean, then terminate.
 ```
 
 ## Fix Actor Prompt
