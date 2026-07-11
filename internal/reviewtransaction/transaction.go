@@ -360,12 +360,12 @@ func (transaction *Transaction) FreezeFindings(findings []Finding, ledger []byte
 	if findings == nil {
 		return errors.New("freeze findings requires an explicit findings array")
 	}
-	for _, finding := range findings {
-		if finding.ID != strings.TrimSpace(finding.ID) {
-			return fmt.Errorf("finding id %q is not whitespace-canonical", finding.ID)
-		}
+	validated := make([]Finding, len(findings))
+	for index, finding := range findings {
+		finding.ID = strings.TrimSpace(finding.ID)
+		validated[index] = finding
 	}
-	ledgerHash, ledgerFindingsHash, err := validateCanonicalLedger(ledger, findings, suppliedLedgerHash)
+	ledgerHash, ledgerFindingsHash, err := validateCanonicalLedger(ledger, validated, suppliedLedgerHash)
 	if err != nil {
 		return err
 	}
@@ -378,9 +378,8 @@ func (transaction *Transaction) FreezeFindings(findings []Finding, ledger []byte
 		}
 	}
 	seen := map[string]struct{}{}
-	validated := make([]Finding, len(findings))
 	infoOutcomes := make(map[string]EvidenceOutcome)
-	for index, finding := range findings {
+	for _, finding := range validated {
 		if finding.ID == "" {
 			return errors.New("finding id is required")
 		}
@@ -391,7 +390,6 @@ func (transaction *Transaction) FreezeFindings(findings []Finding, ledger []byte
 		if !isSupportedSeverity(finding.Severity) {
 			return fmt.Errorf("finding %q has unsupported severity %q", finding.ID, finding.Severity)
 		}
-		validated[index] = finding
 		if !isSevereSeverity(finding.Severity) {
 			infoOutcomes[finding.ID] = OutcomeInfo
 		}

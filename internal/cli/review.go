@@ -25,12 +25,14 @@ const (
 )
 
 type ReviewStartResult struct {
-	Schema         string                        `json:"schema"`
-	Operation      string                        `json:"operation"`
-	Target         reviewtransaction.Snapshot    `json:"target"`
-	Transaction    reviewtransaction.Transaction `json:"transaction"`
-	StoreAuthority string                        `json:"store_authority"`
-	StoreRevision  string                        `json:"store_revision,omitempty"`
+	Schema          string                        `json:"schema"`
+	Operation       string                        `json:"operation"`
+	Target          reviewtransaction.Snapshot    `json:"target"`
+	Transaction     reviewtransaction.Transaction `json:"transaction"`
+	StoreAuthority  string                        `json:"store_authority"`
+	StoreRevision   string                        `json:"store_revision,omitempty"`
+	GenesisRevision string                        `json:"genesis_revision,omitempty"`
+	ChainIdentity   string                        `json:"chain_identity,omitempty"`
 }
 
 type ReviewValidateResult struct {
@@ -313,19 +315,40 @@ func RunReviewStart(args []string, stdout io.Writer) error {
 		Schema: ReviewStartSchema, Operation: "review/start", Target: snapshot, Transaction: *transaction,
 		StoreAuthority: "repository-git-common-dir",
 	}
-	revisionValue, err := store.Append("", reviewtransaction.Record{
+	revisionValue, chain, err := appendReadBackAndMirrorReviewStart(store, reviewtransaction.Record{
 		Operation: "review/start", Transaction: *transaction,
-	})
+	}, *machineTransactionOut)
 	if err != nil {
-		return fmt.Errorf("persist review transaction: %w", err)
+		return err
 	}
+	authoritative := chain.Records[len(chain.Records)-1].Transaction
+	result.Target = authoritative.Snapshot
+	result.Transaction = authoritative
 	result.StoreRevision = revisionValue
-	if strings.TrimSpace(*machineTransactionOut) != "" {
-		if err := reviewtransaction.WriteTransactionAtomic(*machineTransactionOut, *transaction); err != nil {
-			return fmt.Errorf("write non-authoritative machine transaction output: %w", err)
+	result.GenesisRevision = chain.GenesisRevision
+	result.ChainIdentity = chain.Identity
+	return encodeReviewJSON(stdout, result)
+}
+
+func appendReadBackAndMirrorReviewStart(store reviewStepStore, record reviewtransaction.Record, machineTransactionOut string) (string, reviewtransaction.ValidatedChain, error) {
+	revision, err := store.Append("", record)
+	if err != nil {
+		return "", reviewtransaction.ValidatedChain{}, fmt.Errorf("persist review transaction: %w", err)
+	}
+	chain, err := store.LoadChain()
+	if err != nil {
+		return revision, reviewtransaction.ValidatedChain{}, fmt.Errorf("read back committed review/start at %s: %w; recover with review-resume", revision, err)
+	}
+	if chain.HeadRevision != revision {
+		return revision, reviewtransaction.ValidatedChain{}, fmt.Errorf("read back committed review/start at %s: authoritative HEAD is %s; recover with review-resume", revision, chain.HeadRevision)
+	}
+	authoritative := chain.Records[len(chain.Records)-1].Transaction
+	if strings.TrimSpace(machineTransactionOut) != "" {
+		if err := reviewtransaction.WriteTransactionAtomic(machineTransactionOut, authoritative); err != nil {
+			return revision, chain, fmt.Errorf("write non-authoritative machine transaction output: %w", err)
 		}
 	}
-	return encodeReviewJSON(stdout, result)
+	return revision, chain, nil
 }
 
 func classifyReviewSnapshot(ctx context.Context, repo string, snapshot reviewtransaction.Snapshot) (reviewtransaction.RiskLevel, error) {

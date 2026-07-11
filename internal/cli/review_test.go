@@ -60,7 +60,7 @@ func TestRunReviewStartBuildsCompleteTargetWithoutMutatingRealIndex(t *testing.T
 	if result.Schema != ReviewStartSchema || result.Operation != "review/start" {
 		t.Fatalf("result identity = %#v", result)
 	}
-	if result.Transaction.State != reviewtransaction.StateReviewing || result.Transaction.Counters.FullReviews != 1 || result.StoreRevision == "" || result.StoreAuthority != "repository-git-common-dir" {
+	if result.Transaction.State != reviewtransaction.StateReviewing || result.Transaction.Counters.FullReviews != 1 || result.StoreRevision == "" || result.GenesisRevision != result.StoreRevision || result.ChainIdentity == "" || result.StoreAuthority != "repository-git-common-dir" {
 		t.Fatalf("transaction = %#v", result.Transaction)
 	}
 	persisted, err := os.ReadFile(transactionOut)
@@ -201,6 +201,75 @@ func TestRunReviewStartFailedAuthoritativeAppendNeverWritesMachineMirror(t *test
 			}
 			tt.verify(t, mirror)
 			assertReviewHead(t, store, advancedRevision, reviewtransaction.StateFindingsFrozen)
+		})
+	}
+}
+
+func TestReviewStartCommittedAppendWithFailedReadbackNeverWritesMachineMirror(t *testing.T) {
+	preexisting := []byte("pre-existing non-authoritative mirror\n")
+	tests := []struct {
+		name string
+		seed []byte
+	}{
+		{name: "missing mirror remains absent"},
+		{name: "pre-existing mirror remains unchanged", seed: preexisting},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := initReviewCLIRepo(t)
+			lineage := "start-readback-" + strings.ReplaceAll(tt.name, " ", "-")
+			store, err := reviewtransaction.AuthoritativeStore(context.Background(), repo, lineage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := (reviewtransaction.SnapshotBuilder{Repo: repo}).Build(context.Background(), reviewtransaction.Target{
+				Kind: reviewtransaction.TargetCurrentChanges, IntendedUntracked: []string{}, LedgerIDs: []string{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := reviewtransaction.NewTransaction(reviewtransaction.Start{
+				LineageID: lineage, Mode: reviewtransaction.ModeOrdinary4R, Generation: 1,
+				Snapshot:   snapshot,
+				PolicyHash: cliHash("1"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.StartReview(); err != nil {
+				t.Fatal(err)
+			}
+			mirror := filepath.Join(t.TempDir(), "transaction.json")
+			if tt.seed != nil {
+				if err := os.WriteFile(mirror, tt.seed, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failingStore := &failAfterAppendReviewStore{Store: store}
+			revision, _, err := appendReadBackAndMirrorReviewStart(failingStore, reviewtransaction.Record{Operation: "review/start", Transaction: *tx}, mirror)
+			if err == nil || !strings.Contains(err.Error(), "recover with review-resume") || revision == "" {
+				t.Fatalf("appendReadBackAndMirrorReviewStart() = %q, %v", revision, err)
+			}
+			if tt.seed == nil {
+				if _, err := os.Stat(mirror); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("os.Stat(%q) error = %v, want fs.ErrNotExist", mirror, err)
+				}
+			} else {
+				payload, err := os.ReadFile(mirror)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(payload, tt.seed) {
+					t.Fatalf("failed readback rewrote mirror: %q", payload)
+				}
+			}
+			committed, err := store.LoadChain()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if committed.HeadRevision != revision {
+				t.Fatalf("authoritative HEAD = %q, want committed revision %q", committed.HeadRevision, revision)
+			}
 		})
 	}
 }

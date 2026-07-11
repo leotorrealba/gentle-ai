@@ -120,8 +120,6 @@ func TestAuthorityFirstTerminalProcedureIsStructuredAndMirrorEligibilityIsClosed
 }
 
 func TestAuthorityFirstLifecycleRendersIdenticallyForEverySupportedAgent(t *testing.T) {
-	// Mirror persistence is prompt-driven today, so rendered order is the honest
-	// observable boundary; there is no executable callback API to fake here.
 	procedure := authorityFirstTerminalProcedure()
 	for _, agent := range catalog.AllAgents() {
 		t.Run(string(agent.ID), func(t *testing.T) {

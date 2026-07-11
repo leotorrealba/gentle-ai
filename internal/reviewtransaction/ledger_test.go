@@ -61,22 +61,28 @@ func TestFreezeFindingsRejectsInvalidLedgerWithoutMutatingTransaction(t *testing
 	}
 }
 
-func TestFreezeFindingsRejectsWhitespacePaddedIDBeforeBindingLedgerHash(t *testing.T) {
+func TestFreezeFindingsNormalizesWhitespacePaddedIDBeforeBindingLedgerHash(t *testing.T) {
 	tx := newTestTransaction(t, ModeOrdinary4R)
 	if err := tx.StartReview(); err != nil {
 		t.Fatal(err)
 	}
 	findings := []Finding{{ID: " R1-001 ", Severity: "CRITICAL"}}
-	ledger, err := CanonicalLedger(findings)
+	canonicalFindings := []Finding{{ID: "R1-001", Severity: "CRITICAL"}}
+	ledger, err := CanonicalLedger(canonicalFindings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := *tx
-	err = tx.FreezeFindings(findings, ledger, "")
-	if err == nil || !strings.Contains(err.Error(), "not whitespace-canonical") {
+	if err := tx.FreezeFindings(findings, ledger, ""); err != nil {
 		t.Fatalf("FreezeFindings() error = %v", err)
 	}
-	if !transactionsEqual(before, *tx) || tx.LedgerHash != "" || tx.LedgerFindingsHash != "" {
-		t.Fatal("rejected whitespace-padded finding produced an incoherent successful freeze")
+	if len(tx.Findings) != 1 || tx.Findings[0].ID != "R1-001" {
+		t.Fatalf("normalized findings = %#v", tx.Findings)
+	}
+	wantLedgerHash, wantFindingsHash, err := validateCanonicalLedger(ledger, canonicalFindings, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx.LedgerHash != wantLedgerHash || tx.LedgerFindingsHash != wantFindingsHash {
+		t.Fatalf("ledger bindings = %q, %q; want %q, %q", tx.LedgerHash, tx.LedgerFindingsHash, wantLedgerHash, wantFindingsHash)
 	}
 }
