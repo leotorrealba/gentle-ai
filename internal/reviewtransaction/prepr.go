@@ -65,7 +65,7 @@ func deriveBaseAdvanceCompatibility(ctx context.Context, repo string, receipt Re
 	if request.PrePR == nil || strings.TrimSpace(request.PrePR.CIAttestationArtifact) == "" {
 		return BaseAdvanceCompatibility{}, errors.New("trusted CI attestation is required")
 	}
-	mergeBase, err := runGit(ctx, repo, nil, nil, "merge-base", refs.BaseCommit, refs.HeadCommit)
+	mergeBase, err := runGit(ctx, repo, nil, nil, "merge-base", refs.Selection.Commit, refs.HeadCommit)
 	if err != nil {
 		return BaseAdvanceCompatibility{}, fmt.Errorf("derive original merge-base: %w", err)
 	}
@@ -101,7 +101,7 @@ func deriveBaseAdvanceCompatibility(ctx context.Context, repo string, receipt Re
 	if !disjointPaths(originalPaths, basePaths) {
 		return BaseAdvanceCompatibility{}, errors.New("base advance overlaps delivered paths")
 	}
-	mergedOutput, err := runGit(ctx, repo, nil, nil, "merge-tree", "--write-tree", refs.BaseCommit, refs.HeadCommit)
+	mergedOutput, err := runGit(ctx, repo, nil, nil, "merge-tree", "--write-tree", refs.Selection.Commit, refs.HeadCommit)
 	if err != nil {
 		return BaseAdvanceCompatibility{}, errors.New("merge against new base is not conflict-free")
 	}
@@ -113,8 +113,12 @@ func deriveBaseAdvanceCompatibility(ctx context.Context, repo string, receipt Re
 	if err != nil {
 		return BaseAdvanceCompatibility{}, err
 	}
-	baseRefNow, remoteNow, baseNow, err := resolveAuthoritativePublicationBase(ctx, repo)
-	if err != nil || baseRefNow != refs.BaseRef || remoteNow != refs.Remote || baseNow != refs.BaseCommit {
+	selector := ""
+	if refs.Selection.Source == PrePRBoundaryExplicit {
+		selector = refs.Selection.Selector
+	}
+	selectionNow, err := selectPrePRBoundary(ctx, repo, selector)
+	if err != nil || selectionNow != refs.Selection {
 		return BaseAdvanceCompatibility{}, errors.New("pre-PR base ref advanced during validation")
 	}
 	headNow, err := resolveCommit(ctx, repo, "HEAD")

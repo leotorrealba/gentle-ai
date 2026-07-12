@@ -183,6 +183,42 @@ func TestReviewFacadeStartSupportsCommittedBaseDiff(t *testing.T) {
 	if err := RunReviewFacadeValidate([]string{"--cwd", repo, "--lineage", result.LineageID, "--gate", string(reviewtransaction.GatePrePR), "--base-ref", base}, &output); err != nil {
 		t.Fatalf("pre-pr base diff gate: %v\n%s", err, output.String())
 	}
+	output.Reset()
+	if err := RunReviewFacadeValidate([]string{"--cwd", repo, "--lineage", result.LineageID, "--gate", string(reviewtransaction.GatePrePR), "--base-ref", "missing-reviewed-base"}, &output); err == nil {
+		t.Fatal("unavailable pre-PR base was authorized")
+	}
+	var denied ReviewValidateResult
+	if err := json.Unmarshal(output.Bytes(), &denied); err != nil {
+		t.Fatal(err)
+	}
+	if denied.Allowed || denied.Context.LineageID != result.LineageID || denied.Context.PrePRBoundary == nil || denied.Context.PrePRBoundary.Selector != "missing-reviewed-base" || denied.Context.Denial == nil || denied.Context.Denial.Code != "unavailable" {
+		t.Fatalf("facade unavailable base denial = %#v", denied)
+	}
+}
+
+func TestReviewFacadeDeniedGateRetainsObservedBoundaryWithoutAuthorizing(t *testing.T) {
+	var output bytes.Buffer
+	evaluation := reviewtransaction.NativeGateEvaluation{
+		Result: reviewtransaction.GateInvalidated,
+		Reason: "current repository target cannot be derived: explicit base is unavailable",
+		Context: reviewtransaction.GateContext{
+			Gate: reviewtransaction.GatePrePR, LineageID: "review-boundary-context", Generation: 1,
+			PrePRBoundary: &reviewtransaction.PrePRBoundarySelection{
+				Source: reviewtransaction.PrePRBoundaryExplicit, Selector: "reviewed-base", Commit: strings.Repeat("a", 40),
+			},
+			Denial: &reviewtransaction.GateDenial{Stage: "boundary-selection", Code: "unavailable"},
+		},
+	}
+	if err := emitFacadeGateEvaluation(&output, evaluation); err == nil {
+		t.Fatal("denied gate returned success")
+	}
+	var result ReviewValidateResult
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Allowed || result.Result != reviewtransaction.GateInvalidated || result.Context.PrePRBoundary == nil || result.Context.PrePRBoundary.Commit != strings.Repeat("a", 40) || result.Context.Denial == nil || result.Context.Denial.Code != "unavailable" {
+		t.Fatalf("denied boundary result = %#v", result)
+	}
 }
 
 func TestReviewFacadeStartRejectsInvalidBaseRefWithoutPersistingLineage(t *testing.T) {

@@ -274,6 +274,86 @@ func TestCompactGateFinalRecheckRejectsConcurrentAuthorityAndGitChanges(t *testi
 	}
 }
 
+func TestCompactPrePRGatePreservesBoundaryContextForExactAndUnavailableSelectors(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	writeSnapshotFile(t, repo, "tracked.txt", "candidate\n")
+	gitSnapshot(t, repo, "add", "tracked.txt")
+	gitSnapshot(t, repo, "commit", "-m", "candidate")
+	state, _, receipt := approvedCompactRevisionFixture(t, repo, "compact-pre-pr-boundary")
+	base := trimGit(gitSnapshot(t, repo, "rev-parse", "HEAD^"))
+
+	exact := EvaluateCompactGate(context.Background(), repo, receipt, NativeGateRequestInput{Gate: GatePrePR, LineageID: state.LineageID, BaseRef: base})
+	if exact.Result != GateAllow || exact.Context.PrePRBoundary == nil || exact.Context.PrePRBoundary.Commit != base {
+		t.Fatalf("exact compact pre-PR boundary = %#v", exact)
+	}
+
+	unavailable := EvaluateCompactGate(context.Background(), repo, receipt, NativeGateRequestInput{Gate: GatePrePR, LineageID: state.LineageID, BaseRef: "missing-reviewed-base"})
+	if unavailable.Result != GateInvalidated || unavailable.Context.LineageID != state.LineageID || unavailable.Context.PrePRBoundary == nil || unavailable.Context.PrePRBoundary.Selector != "missing-reviewed-base" || unavailable.Context.Denial == nil || unavailable.Context.Denial.Code != "unavailable" {
+		t.Fatalf("unavailable compact pre-PR boundary = %#v", unavailable)
+	}
+	payload, err := json.Marshal(unavailable.Context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseGateContext(payload)
+	if err != nil || !reflect.DeepEqual(parsed, unavailable.Context) {
+		t.Fatalf("unavailable compact pre-PR context round trip = %#v, %v", parsed, err)
+	}
+
+	mismatched := EvaluateCompactGate(context.Background(), repo, receipt, NativeGateRequestInput{Gate: GatePrePR, LineageID: state.LineageID, BaseRef: "HEAD"})
+	if mismatched.Result == GateAllow || mismatched.Context.PrePRBoundary == nil || mismatched.Context.PrePRBoundary.Selector != "HEAD" || mismatched.Context.Denial == nil || mismatched.Context.Denial.Stage != "receipt-binding" {
+		t.Fatalf("mismatched compact pre-PR boundary = %#v", mismatched)
+	}
+}
+
+func TestCompactPrePRGateAllowsOnlyAttestedCompatibleSelectedBaseAdvance(t *testing.T) {
+	fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+	state, receipt := approvedCompactPrePRFixture(t, fixture)
+	input := NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: state.LineageID, BaseRef: "main",
+		PolicyArtifact: fixture.request.PolicyArtifact, PrePRCIAttestation: fixture.attestationPath,
+	}
+	allowed := EvaluateCompactGate(context.Background(), fixture.repo, receipt, input)
+	if allowed.Result != GateAllow || allowed.Context.BaseAdvance == nil || !allowed.Context.BaseAdvance.Compatible || allowed.Context.PrePRBoundary == nil || allowed.Context.PrePRBoundary.Commit == fixture.originalBaseCommit {
+		t.Fatalf("attested compact compatible advance = %#v", allowed)
+	}
+	input.PrePRCIAttestation = ""
+	if denied := EvaluateCompactGate(context.Background(), fixture.repo, receipt, input); denied.Result == GateAllow {
+		t.Fatalf("unattested compact compatible advance = %#v", denied)
+	}
+}
+
+func TestCompactPrePRGateInvalidatesSelectedBaseAndHeadRaces(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(t *testing.T, fixture *compatiblePrePRFixture)
+	}{
+		{name: "selected base moves", mutate: func(t *testing.T, fixture *compatiblePrePRFixture) {
+			gitSnapshot(t, fixture.repo, "update-ref", "refs/heads/main", fixture.originalBaseCommit)
+		}},
+		{name: "head moves", mutate: func(t *testing.T, fixture *compatiblePrePRFixture) {
+			gitSnapshot(t, fixture.repo, "commit", "--allow-empty", "-m", "move head")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+			state, receipt := approvedCompactPrePRFixture(t, fixture)
+			originalHook := finalGateAuthorizationHook
+			finalGateAuthorizationHook = func() {
+				finalGateAuthorizationHook = originalHook
+				tt.mutate(t, fixture)
+			}
+			t.Cleanup(func() { finalGateAuthorizationHook = originalHook })
+			got := EvaluateCompactGate(context.Background(), fixture.repo, receipt, NativeGateRequestInput{
+				Gate: GatePrePR, LineageID: state.LineageID, BaseRef: "main", PolicyArtifact: fixture.request.PolicyArtifact, PrePRCIAttestation: fixture.attestationPath,
+			})
+			if got.Result != GateInvalidated {
+				t.Fatalf("compact %s = %#v", tt.name, got)
+			}
+		})
+	}
+}
+
 func approvedCompactRevisionFixture(t *testing.T, repo, lineage string) (CompactState, CompactStore, CompactReceipt) {
 	t.Helper()
 	state := newCompactRevisionState(t, repo, lineage)
@@ -345,4 +425,60 @@ func approvedCompactCurrentChangesFixture(t *testing.T, repo, lineage string, in
 		t.Fatal(err)
 	}
 	return state, store, receipt
+}
+
+func approvedCompactPrePRFixture(t *testing.T, fixture *compatiblePrePRFixture) (CompactState, CompactReceipt) {
+	t.Helper()
+	snapshot, err := (SnapshotBuilder{Repo: fixture.repo}).Build(context.Background(), Target{Kind: TargetBaseDiff, BaseRef: fixture.originalBaseCommit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	risk, lines, err := (SnapshotBuilder{Repo: fixture.repo}).ClassifySnapshotRisk(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lenses := []string{}
+	if risk == RiskMedium {
+		lenses = []string{LensReliability}
+	} else if risk == RiskHigh {
+		lenses = append([]string(nil), supportedLenses...)
+	}
+	policyHash, err := HashArtifact(fixture.request.PolicyArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := NewCompactState(Start{LineageID: "compact-compatible-base", Mode: ModeOrdinaryBounded, Generation: 1, Snapshot: snapshot, PolicyHash: policyHash, RiskLevel: risk, SelectedLenses: lenses, OriginalChangedLines: &lines})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := CompactAuthoritativeStore(context.Background(), fixture.repo, state.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := store.Replace("", "review/start", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make([]LensResult, len(state.SelectedLenses))
+	for index, lens := range state.SelectedLenses {
+		results[index] = LensResult{Lens: lens, Findings: []Finding{}, Evidence: []string{"review complete"}}
+	}
+	if err := state.CompleteReview(CompactReviewInput{LensResults: results, Classifications: []FindingEvidence{}, RefuterOutcomes: []EvidenceResult{}}); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Replace(revision, "review/complete-review", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteVerification([]byte("independent verification passed\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Replace(revision, "review/complete-verification", state); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := state.Receipt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state, receipt
 }

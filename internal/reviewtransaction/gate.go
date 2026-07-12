@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 )
@@ -40,7 +41,25 @@ type GateRequest struct {
 }
 
 type PrePRRequest struct {
-	CIAttestationArtifact string `json:"ci_attestation_artifact"`
+	CIAttestationArtifact string                  `json:"ci_attestation_artifact"`
+	Boundary              *PrePRBoundarySelection `json:"boundary,omitempty"`
+}
+
+type PrePRBoundarySource string
+
+const (
+	PrePRBoundaryExplicit           PrePRBoundarySource = "explicit"
+	PrePRBoundaryPublicationDefault PrePRBoundarySource = "publication-default"
+)
+
+// PrePRBoundarySelection records how the immutable pre-PR range boundary was
+// selected. It is evidence only; receipt binding still authorizes the range.
+type PrePRBoundarySelection struct {
+	Source    PrePRBoundarySource `json:"source"`
+	Selector  string              `json:"selector"`
+	Commit    string              `json:"commit"`
+	Remote    string              `json:"remote,omitempty"`
+	RemoteRef string              `json:"remote_ref,omitempty"`
 }
 
 type ReleaseRequest struct {
@@ -144,6 +163,16 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 	if !reflect.DeepEqual(authoritativeReceipt, receipt) {
 		return invalid("receipt does not match the authoritative transaction revision")
 	}
+	denialContext := GateContext{
+		Gate: request.Gate, LineageID: record.Transaction.LineageID, Generation: record.Transaction.Generation,
+		StoreRevision: revision, GenesisRevision: chain.GenesisRevision, ChainIdentity: chain.Identity, BundleDigest: bundleDigest,
+		BaseTree: receipt.BaseTree, CandidateTree: receipt.FinalCandidateTree, PathsDigest: receipt.PathsDigest,
+		FixDeltaHash: receipt.FixDeltaHash, PolicyHash: receipt.PolicyHash, LedgerHash: receipt.LedgerHash, EvidenceHash: receipt.EvidenceHash,
+	}
+	if request.Gate == GatePrePR && request.PrePR != nil && request.PrePR.Boundary != nil {
+		boundary := *request.PrePR.Boundary
+		denialContext.PrePRBoundary = &boundary
+	}
 	if request.Gate == GatePreCommit && request.Target.Kind != TargetCurrentChanges {
 		return invalid("pre-commit target must derive current repository changes")
 	}
@@ -157,6 +186,10 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 	artifactPreimagesReadHook()
 	snapshot, resolvedPrePR, err := buildLifecycleSnapshot(ctx, repo, request)
 	if err != nil {
+		if request.Gate == GatePrePR {
+			denialContext.Denial = &GateDenial{Stage: "boundary-selection", Code: "unavailable"}
+			return NativeGateEvaluation{Result: GateInvalidated, Reason: "current repository target cannot be derived: " + err.Error(), Context: denialContext}
+		}
 		return invalid("current repository target cannot be derived: " + err.Error())
 	}
 	if request.Gate == GatePrePush && record.Transaction.Snapshot.Kind == TargetCurrentChanges && snapshot.BaseTree == snapshot.CandidateTree {
@@ -201,6 +234,10 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 		BaseRelationshipValid: snapshot.BaseTree == receipt.BaseTree,
 		ExternalEvidence:      request.ExternalEvidence,
 	}
+	if request.Gate == GatePrePR && resolvedPrePR != nil {
+		boundary := resolvedPrePR.Selection
+		gateContext.PrePRBoundary = &boundary
+	}
 	if request.Gate == GatePrePR && snapshot.BaseTree != receipt.BaseTree {
 		if compatibility, compatibilityErr := deriveBaseAdvanceCompatibility(ctx, repo, receipt, request, snapshot, resolvedPrePR, preimages); compatibilityErr == nil {
 			gateContext.BaseAdvance = &compatibility
@@ -217,6 +254,9 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 		gateContext.Release = &release
 	}
 	result := validateDerivedGate(receipt, gateContext)
+	if request.Gate == GatePrePR && result != GateAllow {
+		gateContext.Denial = &GateDenial{Stage: "receipt-binding", Code: string(result)}
+	}
 	if result == GateAllow {
 		finalGateAuthorizationHook()
 		finalSnapshot, finalRefs, err := buildLifecycleSnapshot(ctx, repo, request)
@@ -229,9 +269,7 @@ func EvaluateNativeGate(ctx context.Context, repo string, receipt Receipt, reque
 }
 
 type resolvedPrePRRefs struct {
-	BaseRef    string
-	Remote     string
-	BaseCommit string
+	Selection  PrePRBoundarySelection
 	HeadCommit string
 }
 
@@ -245,11 +283,7 @@ func buildLifecycleSnapshot(ctx context.Context, repo string, request GateReques
 	if err != nil || request.Gate != GatePrePR {
 		return snapshot, nil, err
 	}
-	configured, err := publicationRemoteConfigured(ctx, repo)
-	if err != nil || !configured {
-		return snapshot, nil, err
-	}
-	baseRef, remote, base, err := resolveAuthoritativePublicationBase(ctx, repo)
+	selection, err := prePRBoundaryForRequest(ctx, repo, request)
 	if err != nil {
 		return Snapshot{}, nil, err
 	}
@@ -258,12 +292,66 @@ func buildLifecycleSnapshot(ctx context.Context, repo string, request GateReques
 		return Snapshot{}, nil, err
 	}
 	snapshot, err = (SnapshotBuilder{Repo: repo}).Build(ctx, Target{
-		Kind: TargetBaseDiff, BaseRef: base, IntendedUntracked: target.IntendedUntracked,
+		Kind: TargetBaseDiff, BaseRef: selection.Commit, IntendedUntracked: target.IntendedUntracked,
 	})
 	if err != nil {
 		return Snapshot{}, nil, err
 	}
-	return snapshot, &resolvedPrePRRefs{BaseRef: baseRef, Remote: remote, BaseCommit: base, HeadCommit: head}, nil
+	return snapshot, &resolvedPrePRRefs{Selection: selection, HeadCommit: head}, nil
+}
+
+func prePRBoundaryForRequest(ctx context.Context, repo string, request GateRequest) (PrePRBoundarySelection, error) {
+	if request.PrePR != nil && request.PrePR.Boundary != nil {
+		selection := *request.PrePR.Boundary
+		selector := ""
+		switch selection.Source {
+		case PrePRBoundaryExplicit:
+			selector = selection.Selector
+		case PrePRBoundaryPublicationDefault:
+		default:
+			return PrePRBoundarySelection{}, errors.New("unsupported pre-PR boundary source")
+		}
+		resolved, err := selectPrePRBoundary(ctx, repo, selector)
+		if err != nil {
+			return PrePRBoundarySelection{}, err
+		}
+		if resolved != selection {
+			return PrePRBoundarySelection{}, errors.New("pre-PR boundary changed during validation")
+		}
+		return resolved, nil
+	}
+	if request.PrePR == nil && strings.TrimSpace(request.Target.BaseRef) != "" {
+		return selectPrePRBoundary(ctx, repo, request.Target.BaseRef)
+	}
+	return selectPrePRBoundary(ctx, repo, "")
+}
+
+func selectPrePRBoundary(ctx context.Context, repo, selector string) (PrePRBoundarySelection, error) {
+	selector = strings.TrimSpace(selector)
+	if selector != "" {
+		if filepath.IsAbs(selector) {
+			return PrePRBoundarySelection{}, errors.New("explicit pre-PR base selector must not be an absolute path")
+		}
+		commit, err := resolveCommit(ctx, repo, selector)
+		if err != nil {
+			return PrePRBoundarySelection{}, fmt.Errorf("resolve explicit pre-PR base %q: %w", selector, err)
+		}
+		return PrePRBoundarySelection{Source: PrePRBoundaryExplicit, Selector: selector, Commit: commit}, nil
+	}
+	ref, remote, commit, err := resolveAuthoritativePublicationBase(ctx, repo)
+	if err != nil {
+		return PrePRBoundarySelection{}, err
+	}
+	return PrePRBoundarySelection{Source: PrePRBoundaryPublicationDefault, Selector: ref, Commit: commit, Remote: remote, RemoteRef: ref}, nil
+}
+
+func buildPrePRTarget(ctx context.Context, repo, selector, ciAttestation string, intendedUntracked []string) (Target, *PrePRRequest, error) {
+	selection, err := selectPrePRBoundary(ctx, repo, selector)
+	if err != nil {
+		return Target{}, nil, err
+	}
+	return Target{Kind: TargetBaseDiff, BaseRef: selection.Commit, IntendedUntracked: append([]string(nil), intendedUntracked...)},
+		&PrePRRequest{CIAttestationArtifact: ciAttestation, Boundary: &selection}, nil
 }
 
 func publicationRemoteConfigured(ctx context.Context, repo string) (bool, error) {

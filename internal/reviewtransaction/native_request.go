@@ -85,20 +85,11 @@ func BuildNativeGateRequest(ctx context.Context, repo string, input NativeGateRe
 		}
 		request.Target = Target{Kind: TargetExactRevision, Revision: head}
 	case GatePrePR:
-		_, _, baseCommit, err := resolveAuthoritativePublicationBase(ctx, repo)
+		target, prePR, err := buildPrePRTarget(ctx, repo, input.BaseRef, input.PrePRCIAttestation, nil)
 		if err != nil {
 			return GateRequest{}, err
 		}
-		if strings.TrimSpace(input.BaseRef) != "" {
-			expected, expectedErr := resolveCommit(ctx, repo, input.BaseRef)
-			if expectedErr != nil || expected != baseCommit {
-				return GateRequest{}, errors.New("native pre-PR base does not match the remote publication boundary")
-			}
-		}
-		request.Target = Target{Kind: TargetBaseDiff, BaseRef: baseCommit}
-		if strings.TrimSpace(input.PrePRCIAttestation) != "" {
-			request.PrePR = &PrePRRequest{CIAttestationArtifact: input.PrePRCIAttestation}
-		}
+		request.Target, request.PrePR = target, prePR
 	case GateRelease:
 		head, err := resolveCommit(ctx, repo, "HEAD")
 		if err != nil {

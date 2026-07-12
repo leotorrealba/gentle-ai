@@ -31,11 +31,24 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 	if err != nil || !compactReceiptEqual(authoritative, receipt) {
 		return invalid("compact receipt does not match current authority")
 	}
+	denialContext := GateContext{
+		Gate: input.Gate, LineageID: receipt.LineageID, Generation: receipt.Generation,
+		StoreRevision: record.Revision, GenesisRevision: record.Revision, ChainIdentity: record.Revision, BundleDigest: record.Revision,
+		BaseTree: receipt.BaseTree, CandidateTree: receipt.FinalCandidateTree, PathsDigest: receipt.PathsDigest,
+		FixDeltaHash: receipt.FixDeltaHash, PolicyHash: receipt.PolicyHash, LedgerHash: EmptyFixDeltaHash, EvidenceHash: receipt.EvidenceHash,
+	}
+	if input.Gate == GatePrePR && strings.TrimSpace(input.BaseRef) != "" {
+		denialContext.PrePRBoundary = &PrePRBoundarySelection{Source: PrePRBoundaryExplicit, Selector: strings.TrimSpace(input.BaseRef)}
+	}
 	if receipt.TerminalState == TerminalEscalated {
 		return NativeGateEvaluation{Result: GateEscalated, Reason: nativeGateReason(GateEscalated)}
 	}
 	request, err := buildCompactGateRequest(ctx, repo, record.State, input)
 	if err != nil {
+		if input.Gate == GatePrePR {
+			denialContext.Denial = &GateDenial{Stage: "boundary-selection", Code: "unavailable"}
+			return NativeGateEvaluation{Result: GateInvalidated, Reason: "compact gate inputs cannot be derived: " + err.Error(), Context: denialContext}
+		}
 		return invalid("compact gate inputs cannot be derived: " + err.Error())
 	}
 	if (request.Gate == GatePostApply || request.Gate == GatePreCommit) && !equalStrings(request.Target.IntendedUntracked, record.State.CurrentSnapshot.IntendedUntracked) {
@@ -64,11 +77,25 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 			compatibleAdvance = proof.Compatible
 		}
 	}
+	gateContext := GateContext{
+		Gate: request.Gate, LineageID: receipt.LineageID, Generation: receipt.Generation,
+		StoreRevision: record.Revision, GenesisRevision: record.Revision, ChainIdentity: record.Revision, BundleDigest: record.Revision,
+		BaseTree: snapshot.BaseTree, CandidateTree: snapshot.CandidateTree, PathsDigest: snapshot.PathsDigest,
+		FixDeltaHash: record.State.FixDeltaHash, PolicyHash: record.State.PolicyHash,
+		LedgerHash: EmptyFixDeltaHash, EvidenceHash: record.State.EvidenceHash,
+		BaseRelationshipValid: snapshot.BaseTree == receipt.BaseTree, BaseAdvance: compatibility,
+	}
+	if request.Gate == GatePrePR && resolvedPrePR != nil {
+		boundary := resolvedPrePR.Selection
+		gateContext.PrePRBoundary = &boundary
+	}
 	if (snapshot.CandidateTree != receipt.FinalCandidateTree || snapshot.PathsDigest != receipt.PathsDigest) && !compatibleAdvance {
-		return NativeGateEvaluation{Result: GateScopeChanged, Reason: nativeGateReason(GateScopeChanged)}
+		gateContext.Denial = &GateDenial{Stage: "receipt-binding", Code: "candidate-or-paths-mismatch"}
+		return NativeGateEvaluation{Result: GateScopeChanged, Reason: nativeGateReason(GateScopeChanged), Context: gateContext}
 	}
 	if snapshot.BaseTree != receipt.BaseTree && !compatibleAdvance {
-		return invalid("current repository base no longer matches compact authority")
+		gateContext.Denial = &GateDenial{Stage: "receipt-binding", Code: "base-mismatch"}
+		return NativeGateEvaluation{Result: GateInvalidated, Reason: "current repository base no longer matches compact authority", Context: gateContext}
 	}
 	var release *ReleaseEvidence
 	if request.Gate == GateRelease {
@@ -81,14 +108,7 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 		}
 		release = &derived
 	}
-	gateContext := GateContext{
-		Gate: request.Gate, LineageID: receipt.LineageID, Generation: receipt.Generation,
-		StoreRevision: record.Revision, GenesisRevision: record.Revision, ChainIdentity: record.Revision, BundleDigest: record.Revision,
-		BaseTree: snapshot.BaseTree, CandidateTree: snapshot.CandidateTree, PathsDigest: snapshot.PathsDigest,
-		FixDeltaHash: record.State.FixDeltaHash, PolicyHash: record.State.PolicyHash,
-		LedgerHash: EmptyFixDeltaHash, EvidenceHash: record.State.EvidenceHash,
-		BaseRelationshipValid: snapshot.BaseTree == receipt.BaseTree, BaseAdvance: compatibility, Release: release,
-	}
+	gateContext.Release = release
 	finalGateAuthorizationHook()
 	finalRecord, loadErr := store.Load()
 	finalSnapshot, finalRefs, snapshotErr := buildLifecycleSnapshot(ctx, repo, request)
@@ -121,23 +141,11 @@ func buildCompactGateRequest(ctx context.Context, repo string, state CompactStat
 		}
 		request.Target = Target{Kind: TargetExactRevision, Revision: head}
 	case GatePrePR:
-		_, _, baseCommit, err := resolveAuthoritativePublicationBase(ctx, repo)
+		target, prePR, err := buildPrePRTarget(ctx, repo, input.BaseRef, input.PrePRCIAttestation, state.InitialSnapshot.IntendedUntracked)
 		if err != nil {
 			return GateRequest{}, err
 		}
-		if strings.TrimSpace(input.BaseRef) != "" {
-			expected, expectedErr := resolveCommit(ctx, repo, input.BaseRef)
-			if expectedErr != nil || expected != baseCommit {
-				return GateRequest{}, errors.New("compact pre-PR base does not match the remote publication boundary")
-			}
-		}
-		request.Target = Target{
-			Kind: TargetBaseDiff, BaseRef: baseCommit,
-			IntendedUntracked: append([]string(nil), state.InitialSnapshot.IntendedUntracked...),
-		}
-		if strings.TrimSpace(input.PrePRCIAttestation) != "" {
-			request.PrePR = &PrePRRequest{CIAttestationArtifact: input.PrePRCIAttestation}
-		}
+		request.Target, request.PrePR = target, prePR
 	case GateRelease:
 		head, err := resolveCommit(ctx, repo, "HEAD")
 		if err != nil {

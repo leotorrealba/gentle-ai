@@ -228,6 +228,182 @@ func TestExplicitPrePRRequestWithoutRemotePreservesUnchangedBase(t *testing.T) {
 	}
 }
 
+func TestSelectPrePRBoundaryUsesExactExplicitOrPublicationDefaultCommit(t *testing.T) {
+	fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+
+	tests := []struct {
+		name     string
+		selector string
+		want     PrePRBoundarySelection
+	}{
+		{
+			name:     "explicit old reviewed base",
+			selector: fixture.originalBaseCommit,
+			want: PrePRBoundarySelection{
+				Source: PrePRBoundaryExplicit, Selector: fixture.originalBaseCommit, Commit: fixture.originalBaseCommit,
+			},
+		},
+		{
+			name: "publication default without selector",
+			want: PrePRBoundarySelection{
+				Source: PrePRBoundaryPublicationDefault, Selector: "refs/heads/main", Commit: trimGit(gitSnapshot(t, fixture.repo, "rev-parse", "main")), Remote: "origin", RemoteRef: "refs/heads/main",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := selectPrePRBoundary(context.Background(), fixture.repo, tt.selector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("selectPrePRBoundary(%q) = %#v, want %#v", tt.selector, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSelectPrePRBoundaryRejectsAbsolutePathLikeSelector(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	if _, err := selectPrePRBoundary(context.Background(), repo, filepath.Join(repo, "outside")); err == nil {
+		t.Fatal("absolute path-like selector was accepted")
+	}
+}
+
+func TestSelectPrePRBoundaryUsesRepositoryRootForSubdirectoriesAndRelativeSelectors(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	writeSnapshotFile(t, repo, "tracked.txt", "candidate\n")
+	gitSnapshot(t, repo, "add", "tracked.txt")
+	gitSnapshot(t, repo, "commit", "-m", "candidate")
+	want := trimGit(gitSnapshot(t, repo, "rev-parse", "HEAD~1"))
+	subdirectory := filepath.Join(repo, "nested", "work")
+	if err := os.MkdirAll(subdirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, location := range []string{repo, subdirectory} {
+		selection, err := selectPrePRBoundary(context.Background(), location, "HEAD~1")
+		if err != nil || selection.Source != PrePRBoundaryExplicit || selection.Commit != want {
+			t.Fatalf("selectPrePRBoundary(%q) = %#v, %v", location, selection, err)
+		}
+	}
+}
+
+func TestBuildNativePrePRRequestKeepsExplicitReviewedBaseWhenDefaultAdvanced(t *testing.T) {
+	fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+
+	request, err := BuildNativeGateRequest(context.Background(), fixture.repo, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: fixture.receipt.LineageID, BaseRef: fixture.originalBaseCommit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Target.BaseRef != fixture.originalBaseCommit || request.PrePR == nil || request.PrePR.Boundary == nil || *request.PrePR.Boundary != (PrePRBoundarySelection{
+		Source: PrePRBoundaryExplicit, Selector: fixture.originalBaseCommit, Commit: fixture.originalBaseCommit,
+	}) {
+		t.Fatalf("explicit pre-PR request = %#v", request)
+	}
+	if evaluation := EvaluateNativeGate(context.Background(), fixture.repo, fixture.receipt, request); evaluation.Result != GateAllow || evaluation.Context.PrePRBoundary == nil || *evaluation.Context.PrePRBoundary != *request.PrePR.Boundary {
+		t.Fatalf("explicit pre-PR evaluation = %#v", evaluation)
+	}
+}
+
+func TestNativePrePRGateInvalidatesWhenExplicitSelectorMoves(t *testing.T) {
+	fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+	request, err := BuildNativeGateRequest(context.Background(), fixture.repo, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: fixture.receipt.LineageID, BaseRef: "main",
+		PolicyArtifact: fixture.request.PolicyArtifact, LedgerArtifact: fixture.request.LedgerArtifact,
+		EvidenceArtifact: fixture.request.EvidenceArtifact, PrePRCIAttestation: fixture.attestationPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalHook := finalGateAuthorizationHook
+	finalGateAuthorizationHook = func() {
+		finalGateAuthorizationHook = originalHook
+		gitSnapshot(t, fixture.repo, "update-ref", "refs/heads/main", fixture.originalBaseCommit)
+	}
+	t.Cleanup(func() { finalGateAuthorizationHook = originalHook })
+
+	if got := EvaluateNativeGate(context.Background(), fixture.repo, fixture.receipt, request); got.Result != GateInvalidated {
+		t.Fatalf("moving explicit selector = %#v", got)
+	}
+}
+
+func TestNativePrePRGateInvalidatesWhenCommitAMovesHead(t *testing.T) {
+	fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+	request, err := BuildNativeGateRequest(context.Background(), fixture.repo, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: fixture.receipt.LineageID, BaseRef: fixture.originalBaseCommit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalHook := finalGateAuthorizationHook
+	finalGateAuthorizationHook = func() {
+		finalGateAuthorizationHook = originalHook
+		writeSnapshotFile(t, fixture.repo, fixture.deliveryPath, "changed after review\n")
+		gitSnapshot(t, fixture.repo, "commit", "-am", "move head")
+	}
+	t.Cleanup(func() { finalGateAuthorizationHook = originalHook })
+
+	if got := EvaluateNativeGate(context.Background(), fixture.repo, fixture.receipt, request); got.Result != GateInvalidated {
+		t.Fatalf("commit -a head movement = %#v", got)
+	}
+}
+
+func TestNativePrePRGateIgnoresStagedAndEmptyIndexState(t *testing.T) {
+	fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+	request, err := BuildNativeGateRequest(context.Background(), fixture.repo, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: fixture.receipt.LineageID, BaseRef: fixture.originalBaseCommit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshotFile(t, fixture.repo, "staged-only.txt", "index does not authorize\n")
+	gitSnapshot(t, fixture.repo, "add", "staged-only.txt")
+	if staged := EvaluateNativeGate(context.Background(), fixture.repo, fixture.receipt, request); staged.Result != GateAllow || staged.Context.CandidateTree != fixture.receipt.FinalCandidateTree {
+		t.Fatalf("staged-only pre-PR gate = %#v", staged)
+	}
+	gitSnapshot(t, fixture.repo, "reset", "--", "staged-only.txt")
+	if empty := EvaluateNativeGate(context.Background(), fixture.repo, fixture.receipt, request); empty.Result != GateAllow || empty.Context.CandidateTree != fixture.receipt.FinalCandidateTree {
+		t.Fatalf("empty-index pre-PR gate = %#v", empty)
+	}
+}
+
+func TestNativePrePRGateDenialRetainsAuthorityAndObservedBoundary(t *testing.T) {
+	fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+	request, err := BuildNativeGateRequest(context.Background(), fixture.repo, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: fixture.receipt.LineageID, BaseRef: fixture.originalBaseCommit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PrePR.Boundary.Selector = "missing-reviewed-base"
+
+	got := EvaluateNativeGate(context.Background(), fixture.repo, fixture.receipt, request)
+	if got.Result != GateInvalidated || got.Context.LineageID != fixture.receipt.LineageID || got.Context.PrePRBoundary == nil || got.Context.PrePRBoundary.Selector != "missing-reviewed-base" || got.Context.Denial == nil || got.Context.Denial.Stage != "boundary-selection" || got.Context.Denial.Code != "unavailable" {
+		t.Fatalf("unavailable explicit boundary = %#v", got)
+	}
+}
+
+func TestNativePrePRGateAnnotatesReceiptBindingDenial(t *testing.T) {
+	fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+	request, err := BuildNativeGateRequest(context.Background(), fixture.repo, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: fixture.receipt.LineageID, BaseRef: "main",
+		PolicyArtifact: fixture.request.PolicyArtifact, LedgerArtifact: fixture.request.LedgerArtifact,
+		EvidenceArtifact: fixture.request.EvidenceArtifact, PrePRCIAttestation: fixture.attestationPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshotFile(t, fixture.repo, fixture.deliveryPath, "changed delivery\n")
+	gitSnapshot(t, fixture.repo, "commit", "-am", "change delivery")
+	got := EvaluateNativeGate(context.Background(), fixture.repo, fixture.receipt, request)
+	if got.Result == GateAllow || got.Context.PrePRBoundary == nil || got.Context.Denial == nil || got.Context.Denial.Stage != "receipt-binding" {
+		t.Fatalf("receipt-binding denial = %#v", got)
+	}
+}
+
 func TestPublicationRemoteUsesGitPushPrecedence(t *testing.T) {
 	repo := initSnapshotRepo(t)
 	branch := strings.TrimSpace(gitSnapshot(t, repo, "symbolic-ref", "--short", "HEAD"))
@@ -243,6 +419,46 @@ func TestPublicationRemoteUsesGitPushPrecedence(t *testing.T) {
 	remote, configured, err := publicationRemote(context.Background(), repo)
 	if err != nil || !configured || remote != "branch-push" {
 		t.Fatalf("publicationRemote() = %q, %v, %v", remote, configured, err)
+	}
+}
+
+func TestPublicationRemotePreservesTrackingFirstPushAndExplicitRefspecAuthority(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		configure func(t *testing.T, repo, branch string)
+		want      string
+	}{
+		{
+			name: "tracking branch", want: "tracking",
+			configure: func(t *testing.T, repo, branch string) {
+				gitSnapshot(t, repo, "remote", "add", "tracking", filepath.Join(t.TempDir(), "tracking.git"))
+				gitSnapshot(t, repo, "config", "branch."+branch+".remote", "tracking")
+			},
+		},
+		{
+			name: "first push configuration", want: "publish",
+			configure: func(t *testing.T, repo, branch string) {
+				gitSnapshot(t, repo, "remote", "add", "publish", filepath.Join(t.TempDir(), "publish.git"))
+				gitSnapshot(t, repo, "config", "branch."+branch+".pushRemote", "publish")
+			},
+		},
+		{
+			name: "explicit refspec retains origin", want: "origin",
+			configure: func(t *testing.T, repo, _ string) {
+				gitSnapshot(t, repo, "remote", "add", "origin", filepath.Join(t.TempDir(), "origin.git"))
+				gitSnapshot(t, repo, "config", "remote.origin.push", "refs/heads/main:refs/heads/main")
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := initSnapshotRepo(t)
+			branch := strings.TrimSpace(gitSnapshot(t, repo, "symbolic-ref", "--short", "HEAD"))
+			tt.configure(t, repo, branch)
+			got, configured, err := publicationRemote(context.Background(), repo)
+			if err != nil || !configured || got != tt.want {
+				t.Fatalf("publicationRemote() = %q, %v, %v; want %q", got, configured, err, tt.want)
+			}
+		})
 	}
 }
 

@@ -164,6 +164,15 @@ type GateContext struct {
 	ExternalEvidence      ExternalEvidenceDisposition `json:"external_evidence,omitempty"`
 	BaseAdvance           *BaseAdvanceCompatibility   `json:"base_advanced_compatible,omitempty"`
 	Release               *ReleaseEvidence            `json:"release,omitempty"`
+	PrePRBoundary         *PrePRBoundarySelection     `json:"pre_pr_boundary,omitempty"`
+	Denial                *GateDenial                 `json:"denial,omitempty"`
+}
+
+// GateDenial identifies the non-authorizing validation stage that rejected a
+// gate request. Its presence never changes the gate result.
+type GateDenial struct {
+	Stage string `json:"stage"`
+	Code  string `json:"code"`
 }
 
 func validateDerivedGate(receipt Receipt, context GateContext) GateResult {
@@ -238,6 +247,17 @@ func ParseGateContext(payload []byte) (GateContext, error) {
 		if context.Gate != GatePrePR || !context.BaseAdvance.valid() {
 			return GateContext{}, errors.New("gate context contains invalid compatible base advance evidence")
 		}
+	}
+	if context.PrePRBoundary != nil {
+		boundary := context.PrePRBoundary
+		unavailable := boundary.Commit == "" && context.Denial != nil && context.Denial.Stage == "boundary-selection" && context.Denial.Code == "unavailable"
+		if context.Gate != GatePrePR || (!validGitTree(boundary.Commit) && !unavailable) || strings.TrimSpace(boundary.Selector) == "" ||
+			(boundary.Source != PrePRBoundaryExplicit && boundary.Source != PrePRBoundaryPublicationDefault) {
+			return GateContext{}, errors.New("gate context contains invalid pre-PR boundary evidence")
+		}
+	}
+	if context.Denial != nil && (strings.TrimSpace(context.Denial.Stage) == "" || strings.TrimSpace(context.Denial.Code) == "") {
+		return GateContext{}, errors.New("gate context denial requires stage and code")
 	}
 	switch context.ExternalEvidence {
 	case ExternalEvidenceNone, ExternalEvidenceInvalidating, ExternalEvidenceEscalating:
