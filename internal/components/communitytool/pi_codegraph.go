@@ -40,11 +40,6 @@ var ErrPiCodeGraphAdapterHealthUnavailable = errors.New("Pi MCP adapter health i
 
 const piCodeGraphPendingAction = "Pi CodeGraph integration is pending: Pi 0.80.6 has no supported machine-verifiable adapter health signal. CodeGraph capability was not reported as configured."
 
-// piCodeGraphAdapterRuntimeRunner is the Pi subprocess boundary. It captures
-// combined stdout/stderr so exit status alone cannot be mistaken for adapter
-// health.
-var piCodeGraphAdapterRuntimeRunner = defaultPiCodeGraphAdapterRuntimeRunner
-
 type PiChildClassification string
 
 const (
@@ -425,9 +420,6 @@ func verifyPiCodeGraph(mcpPath string, children []PiCodeGraphChild) error {
 }
 
 func verifyPiCodeGraphWithProbe(mcpPath string, children []PiCodeGraphChild, probe PiCodeGraphEffectiveMCPProbe) error {
-	if _, err := verifyPiMCPWithProbe(mcpPath, probe); err != nil {
-		return err
-	}
 	for _, child := range children {
 		if child.Classification == PiChildMisconfigured {
 			return fmt.Errorf("Pi child %q is misconfigured: %s", child.Name, child.Reason)
@@ -442,6 +434,9 @@ func verifyPiCodeGraphWithProbe(mcpPath string, children []PiCodeGraphChild, pro
 		if child.Classification == PiChildCompatible && (!strings.Contains(string(body), piCodeGraphToolMarker) || !slices.Contains(child.Tools, "bash") || !slices.Contains(child.Tools, "mcp")) {
 			return fmt.Errorf("Pi child %q lacks verified CodeGraph tools", child.Name)
 		}
+	}
+	if _, err := verifyPiMCPWithProbe(mcpPath, probe); err != nil {
+		return err
 	}
 	return nil
 }
@@ -464,7 +459,7 @@ func verifyPiMCPWithProbe(mcpPath string, probe PiCodeGraphEffectiveMCPProbe) (P
 		return PiCodeGraphMCPVerification{}, fmt.Errorf("Pi CodeGraph MCP capability probe is not configured")
 	}
 	result, err := probe(mcpPath)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrPiCodeGraphAdapterHealthUnavailable) {
 		return PiCodeGraphMCPVerification{}, fmt.Errorf("Pi CodeGraph MCP capability probe failed: %w", err)
 	}
 	if !result.AdapterAvailable || !result.Initialized {
@@ -473,7 +468,11 @@ func verifyPiMCPWithProbe(mcpPath string, probe PiCodeGraphEffectiveMCPProbe) (P
 	if !isReadOnlyCodeGraphExploreSchema(result.Tools) {
 		return PiCodeGraphMCPVerification{}, fmt.Errorf("Pi CodeGraph MCP tools/list does not expose the required read-only codegraph_explore schema")
 	}
-	return PiCodeGraphMCPVerification{Adapter: true, ReadOnlyExplore: true, Tools: []string{"codegraph_explore"}}, nil
+	verification := PiCodeGraphMCPVerification{Adapter: true, ReadOnlyExplore: true, Tools: []string{"codegraph_explore"}}
+	if err != nil {
+		return verification, ErrPiCodeGraphAdapterHealthUnavailable
+	}
+	return verification, nil
 }
 
 func probePiCodeGraphMCP(mcpPath string) (PiCodeGraphMCPProbeResult, error) {
@@ -481,18 +480,16 @@ func probePiCodeGraphMCP(mcpPath string) (PiCodeGraphMCPProbeResult, error) {
 }
 
 func probePiCodeGraphMCPWithAgentDir(mcpPath, agentDir string) (PiCodeGraphMCPProbeResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return probePiCodeGraphMCPWithAgentDirContext(ctx, mcpPath, agentDir)
+}
+
+func probePiCodeGraphMCPWithAgentDirContext(ctx context.Context, mcpPath, agentDir string) (probeResult PiCodeGraphMCPProbeResult, returnErr error) {
 	adapterPath := filepath.Join(agentDir, "npm", "node_modules", "pi-mcp-adapter", "index.ts")
 	if _, err := os.Stat(adapterPath); err != nil {
 		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("Pi MCP adapter extension is unavailable at %q: %w", adapterPath, err)
 	}
-	if result, err := probePiCodeGraphAdapterRuntime(agentDir, mcpPath); err != nil {
-		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("Pi MCP adapter runtime is unavailable: %w", err)
-	} else if !result.AdapterAvailable || !result.Initialized {
-		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("Pi MCP adapter runtime did not initialize")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	command := exec.CommandContext(ctx, "codegraph", "serve", "--mcp")
 	stdin, err := command.StdinPipe()
 	if err != nil {
@@ -507,8 +504,19 @@ func probePiCodeGraphMCPWithAgentDir(mcpPath, agentDir string) (PiCodeGraphMCPPr
 	}
 	defer func() {
 		_ = stdin.Close()
-		_ = command.Process.Kill()
-		_ = command.Wait()
+		killErr := command.Process.Kill()
+		waitErr := command.Wait()
+		if errors.Is(returnErr, context.DeadlineExceeded) {
+			return
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			probeResult = PiCodeGraphMCPProbeResult{}
+			returnErr = fmt.Errorf("wait for CodeGraph MCP server: %w", context.DeadlineExceeded)
+			return
+		}
+		if returnErr == nil && errors.Is(killErr, os.ErrProcessDone) && waitErr != nil {
+			returnErr = fmt.Errorf("wait for CodeGraph MCP server: %w", waitErr)
+		}
 	}()
 
 	encoder := json.NewEncoder(stdin)
@@ -519,8 +527,14 @@ func probePiCodeGraphMCPWithAgentDir(mcpPath, agentDir string) (PiCodeGraphMCPPr
 	}); err != nil {
 		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("send MCP initialize: %w", err)
 	}
-	if _, err := readPiMCPResponse(decoder, 1); err != nil {
-		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("MCP initialize: %w", err)
+	initializeResponse, err := readPiMCPResponse(decoder, 1)
+	if err != nil {
+		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("MCP initialize: %w", piCodeGraphMCPDeadlineError(ctx, "read response", err))
+	}
+	initializeResult, ok := initializeResponse["result"].(map[string]any)
+	protocolVersion, versionOK := initializeResult["protocolVersion"].(string)
+	if initializeResponse["jsonrpc"] != "2.0" || !ok || !versionOK || strings.TrimSpace(protocolVersion) == "" {
+		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("MCP initialize: invalid JSON-RPC 2.0 result")
 	}
 	if err := encoder.Encode(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized", "params": map[string]any{}}); err != nil {
 		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("send MCP initialized notification: %w", err)
@@ -530,7 +544,7 @@ func probePiCodeGraphMCPWithAgentDir(mcpPath, agentDir string) (PiCodeGraphMCPPr
 	}
 	response, err := readPiMCPResponse(decoder, 2)
 	if err != nil {
-		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("MCP tools/list: %w", err)
+		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("MCP tools/list: %w", piCodeGraphMCPDeadlineError(ctx, "read response", err))
 	}
 	result, _ := response["result"].(map[string]any)
 	rawTools, _ := result["tools"].([]any)
@@ -546,62 +560,14 @@ func probePiCodeGraphMCPWithAgentDir(mcpPath, agentDir string) (PiCodeGraphMCPPr
 		}
 		tools = append(tools, tool)
 	}
-	return PiCodeGraphMCPProbeResult{AdapterAvailable: true, Initialized: true, Tools: tools}, nil
+	return PiCodeGraphMCPProbeResult{AdapterAvailable: true, Initialized: true, Tools: tools}, ErrPiCodeGraphAdapterHealthUnavailable
 }
 
-func probePiCodeGraphAdapterRuntime(agentDir, mcpPath string) (PiCodeGraphMCPProbeResult, error) {
-	// Pi 0.80.6 exposes --mcp-config and JSON print mode but no dedicated MCP
-	// status API. Ask its adapter status command and accept only explicit
-	// codegraph success evidence from the combined process output.
-	args := []string{"--mcp-config", mcpPath, "--mode", "json", "--no-session", "--offline", "--print", "/mcp status"}
-	output, err := piCodeGraphAdapterRuntimeRunner("pi", args, append(os.Environ(), "PI_CODING_AGENT_DIR="+agentDir))
-	if err != nil {
-		return PiCodeGraphMCPProbeResult{}, fmt.Errorf("run Pi MCP adapter for %q: %w: %s", mcpPath, err, strings.TrimSpace(string(output)))
+func piCodeGraphMCPDeadlineError(ctx context.Context, phase string, err error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%s: %w", phase, context.DeadlineExceeded)
 	}
-	if err := validatePiCodeGraphAdapterRuntimeOutput(output); err != nil {
-		return PiCodeGraphMCPProbeResult{}, err
-	}
-	return PiCodeGraphMCPProbeResult{}, ErrPiCodeGraphAdapterHealthUnavailable
-}
-
-func defaultPiCodeGraphAdapterRuntimeRunner(name string, args, env []string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = env
-	return cmd.CombinedOutput()
-}
-
-func validatePiCodeGraphAdapterRuntimeOutput(output []byte) error {
-	status := strings.ToLower(strings.TrimSpace(string(output)))
-	if status == "" {
-		return fmt.Errorf("Pi MCP adapter runtime produced no capability evidence")
-	}
-	failureEvidence := []string{
-		"failed to load mcp config",
-		"failed to load mcp",
-		"failed to load extension",
-		"failed to load adapter",
-		"adapter load error",
-		"error loading mcp",
-		"mcp adapter error",
-		"not ready",
-		"not running",
-		"unloaded",
-		"inactive",
-		"broken",
-		"not connected",
-		"disconnected",
-	}
-	for _, evidence := range failureEvidence {
-		if strings.Contains(status, evidence) {
-			return fmt.Errorf("Pi MCP adapter runtime reported failure: %s", strings.TrimSpace(string(output)))
-		}
-	}
-	if strings.Contains(status, "unknown") && strings.Contains(status, "/mcp") {
-		return fmt.Errorf("Pi MCP adapter runtime does not recognize /mcp status: %s", strings.TrimSpace(string(output)))
-	}
-	return ErrPiCodeGraphAdapterHealthUnavailable
+	return err
 }
 
 func readPiMCPResponse(decoder *json.Decoder, id int) (map[string]any, error) {
@@ -629,7 +595,9 @@ func isReadOnlyCodeGraphExploreSchema(tools []PiCodeGraphMCPTool) bool {
 		return false
 	}
 	properties, ok := schema["properties"].(map[string]any)
-	if !ok || len(properties) != 3 || !hasSchemaType(properties, "query", "string") || !hasSchemaType(properties, "maxFiles", "number") || !hasSchemaType(properties, "projectPath", "string") {
+	if !ok || len(properties) != 3 || !hasSchemaType(properties, "query", "string") ||
+		(!hasSchemaType(properties, "maxFiles", "integer") && !hasSchemaType(properties, "maxFiles", "number")) ||
+		!hasSchemaType(properties, "projectPath", "string") {
 		return false
 	}
 	required, ok := schema["required"].([]any)
