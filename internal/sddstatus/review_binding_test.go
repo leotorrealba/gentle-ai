@@ -55,6 +55,115 @@ func TestBindApprovedReviewCASAndLiveEvidence(t *testing.T) {
 	}
 }
 
+func TestBindApprovedReviewUsesNestedOpenSpecPlanningWorkspace(t *testing.T) {
+	root := t.TempDir()
+	planningRoot := filepath.Join(root, "packages", "app")
+	changeRoot := seedReadyChange(t, planningRoot, "thin", "- [x] 1.1 Done\n")
+	writeApprovedCompactAuthorityForChange(t, root, changeRoot, "approved-thin")
+
+	binding, err := BindApprovedReview(context.Background(), planningRoot, "thin", "approved-thin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deeperPath := filepath.Join(planningRoot, "src", "feature")
+	if err := os.MkdirAll(deeperPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BindApprovedReview(context.Background(), deeperPath, "thin", "approved-thin", binding.Revision); err != nil {
+		t.Fatalf("bind from deeper package path: %v", err)
+	}
+	store, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), root, "approved-thin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bindingPath(store, "thin")); err != nil {
+		t.Fatalf("binding was not stored in the repository common dir: %v", err)
+	}
+	status, err := Resolve(ResolveOptions{CWD: planningRoot, ChangeName: "thin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.PlanningHome.Path != filepath.Join(planningRoot, "openspec") || status.ReviewGate == nil || status.ReviewGate.Result != reviewtransaction.GateAllow {
+		t.Fatalf("nested planning status did not consume canonical binding: %#v", status)
+	}
+}
+
+func TestBindApprovedReviewRejectsAmbiguousPlanningChanges(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		seed func(t *testing.T, root, planningRoot string)
+	}{
+		{name: "ancestor collision", seed: func(t *testing.T, root, planningRoot string) {
+			seedReadyChange(t, root, "thin", "- [x] 1.1 Root\n")
+			seedReadyChange(t, planningRoot, "thin", "- [x] 1.1 Package\n")
+		}},
+		{name: "sibling collision", seed: func(t *testing.T, root, planningRoot string) {
+			seedReadyChange(t, planningRoot, "thin", "- [x] 1.1 App\n")
+			seedReadyChange(t, filepath.Join(root, "packages", "api"), "thin", "- [x] 1.1 API\n")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			planningRoot := filepath.Join(root, "packages", "app")
+			tt.seed(t, root, planningRoot)
+			runSDDStatusGit(t, root, "init", "-q")
+
+			if _, err := BindApprovedReview(context.Background(), planningRoot, "thin", "approved-thin", ""); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+				t.Fatalf("ambiguous planning changes error = %v", err)
+			}
+		})
+	}
+}
+
+func TestBindApprovedReviewRejectsOpenSpecSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	planningRoot := filepath.Join(root, "packages", "app")
+	if err := os.MkdirAll(planningRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	seedReadyChange(t, outside, "thin", "- [x] 1.1 Outside\n")
+	if err := os.Symlink(filepath.Join(outside, "openspec"), filepath.Join(planningRoot, "openspec")); err != nil {
+		t.Fatal(err)
+	}
+	runSDDStatusGit(t, root, "init", "-q")
+
+	if _, err := BindApprovedReview(context.Background(), planningRoot, "thin", "approved-thin", ""); err == nil || !strings.Contains(err.Error(), "outside repository") {
+		t.Fatalf("OpenSpec symlink escape error = %v", err)
+	}
+}
+
+func TestBindApprovedReviewDoesNotFallBackPastNestedPlanningWorkspace(t *testing.T) {
+	root := t.TempDir()
+	planningRoot := filepath.Join(root, "packages", "app")
+	seedReadyChange(t, root, "thin", "- [x] 1.1 Root\n")
+	seedReadyChange(t, planningRoot, "other", "- [x] 1.1 Package\n")
+	runSDDStatusGit(t, root, "init", "-q")
+
+	if _, err := BindApprovedReview(context.Background(), planningRoot, "thin", "approved-thin", ""); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("nested planning workspace fallback error = %v", err)
+	}
+}
+
+func TestBindApprovedReviewChecksNestedPlanningLedger(t *testing.T) {
+	root := t.TempDir()
+	planningRoot := filepath.Join(root, "packages", "app")
+	changeRoot := seedReadyChange(t, planningRoot, "thin", "- [x] 1.1 Done\n")
+	writeApprovedCompactAuthorityForChange(t, root, changeRoot, "approved-thin")
+	write(t, filepath.Join(changeRoot, "reviews", "ledger.json"), `{"schema":"gentle-ai.review-ledger/v1","findings":[{"id":"wrong"}]}`)
+
+	if _, err := BindApprovedReview(context.Background(), planningRoot, "thin", "approved-thin", ""); err == nil || !strings.Contains(err.Error(), "ledger does not equal") {
+		t.Fatalf("nested planning ledger error = %v", err)
+	}
+	store, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), root, "approved-thin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bindingPath(store, "thin")); !os.IsNotExist(err) {
+		t.Fatalf("failed nested bind mutated canonical binding path: %v", err)
+	}
+}
+
 func TestResolveConsumesOnlyAnExplicitValidBinding(t *testing.T) {
 	root := t.TempDir()
 	changeRoot := seedReadyChange(t, root, "thin", "- [x] 1.1 Done\n")

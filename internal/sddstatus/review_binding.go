@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 
 	"github.com/gentleman-programming/gentle-ai/internal/reviewtransaction"
 )
@@ -41,8 +42,9 @@ func BindApprovedReview(ctx context.Context, repo, change, lineage, expected str
 	if err != nil {
 		return ReviewBinding{}, err
 	}
-	if info, statErr := os.Stat(filepath.Join(root, "openspec", "changes", change)); statErr != nil || !info.IsDir() {
-		return ReviewBinding{}, errors.New("selected OpenSpec change does not exist")
+	changeRoot, err := resolveBindingChangeRoot(root, repo, change)
+	if err != nil {
+		return ReviewBinding{}, err
 	}
 	store, err := reviewtransaction.CompactAuthoritativeStore(ctx, root, lineage)
 	if err != nil {
@@ -61,7 +63,7 @@ func BindApprovedReview(ctx context.Context, repo, change, lineage, expected str
 	if err != nil || receiptErr != nil || !reflect.DeepEqual(receipt, authoritative) {
 		return ReviewBinding{}, errors.New("compact receipt does not match approved authority")
 	}
-	if err := verifyBindingLedger(root, change, record.State.Findings); err != nil {
+	if err := verifyBindingLedger(changeRoot, record.State.Findings); err != nil {
 		return ReviewBinding{}, err
 	}
 	input := reviewtransaction.NativeGateRequestInput{Gate: reviewtransaction.GatePostApply, LineageID: lineage}
@@ -74,7 +76,8 @@ func BindApprovedReview(ctx context.Context, repo, change, lineage, expected str
 	final, finalErr := store.Load()
 	finalPayload, readErr := os.ReadFile(store.ReceiptPath())
 	finalGate := reviewtransaction.EvaluateCompactGate(ctx, root, receipt, input)
-	if finalErr != nil || readErr != nil || final.Revision != record.Revision || !bytes.Equal(payload, finalPayload) || finalGate.Result != reviewtransaction.GateAllow || !reflect.DeepEqual(gate.Context, finalGate.Context) {
+	finalChangeRoot, changeErr := resolveBindingChangeRoot(root, repo, change)
+	if finalErr != nil || readErr != nil || changeErr != nil || finalChangeRoot != changeRoot || final.Revision != record.Revision || !bytes.Equal(payload, finalPayload) || finalGate.Result != reviewtransaction.GateAllow || !reflect.DeepEqual(gate.Context, finalGate.Context) {
 		return ReviewBinding{}, errors.New("authority or live gate changed before binding publish")
 	}
 	return binding, writeBinding(bindingPath(store, change), expected, binding)
@@ -85,6 +88,10 @@ func validateBoundReview(ctx context.Context, repo, change string) (ReviewBindin
 		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, errors.New("invalid OpenSpec change name")
 	}
 	root, err := (reviewtransaction.SnapshotBuilder{Repo: repo}).ResolveRepositoryRoot(ctx)
+	if err != nil {
+		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, err
+	}
+	changeRoot, err := resolveBindingChangeRoot(root, repo, change)
 	if err != nil {
 		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, err
 	}
@@ -120,7 +127,7 @@ func validateBoundReview(ctx context.Context, repo, change string) (ReviewBindin
 	if err != nil || receiptErr != nil || !reflect.DeepEqual(receipt, authoritative) {
 		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, errors.New("bound compact receipt does not match approved authority")
 	}
-	if err := verifyBindingLedger(root, change, record.State.Findings); err != nil {
+	if err := verifyBindingLedger(changeRoot, record.State.Findings); err != nil {
 		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, err
 	}
 	evaluation := reviewtransaction.EvaluateCompactGate(ctx, root, receipt, reviewtransaction.NativeGateRequestInput{Gate: reviewtransaction.GatePostApply, LineageID: binding.Lineage})
@@ -131,7 +138,8 @@ func validateBoundReview(ctx context.Context, repo, change string) (ReviewBindin
 	finalBinding, bindingErr := os.ReadFile(bindingPath(probe, change))
 	finalRecord, recordErr := store.Load()
 	finalReceipt, receiptErr := os.ReadFile(store.ReceiptPath())
-	if bindingErr != nil || recordErr != nil || receiptErr != nil || !bytes.Equal(finalBinding, payload) || finalRecord.Revision != record.Revision || !reflect.DeepEqual(finalRecord.State, record.State) || finalRecord.State.State != reviewtransaction.StateApproved || !bytes.Equal(finalReceipt, receiptPayload) || bindingHash(finalReceipt) != binding.ReceiptHash {
+	finalChangeRoot, changeErr := resolveBindingChangeRoot(root, repo, change)
+	if bindingErr != nil || recordErr != nil || receiptErr != nil || changeErr != nil || finalChangeRoot != changeRoot || !bytes.Equal(finalBinding, payload) || finalRecord.Revision != record.Revision || !reflect.DeepEqual(finalRecord.State, record.State) || finalRecord.State.State != reviewtransaction.StateApproved || !bytes.Equal(finalReceipt, receiptPayload) || bindingHash(finalReceipt) != binding.ReceiptHash {
 		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, errors.New("bound authority, receipt, or binding changed during final read")
 	}
 	finalReceiptValue, parseErr := reviewtransaction.ParseCompactReceipt(finalReceipt)
@@ -162,8 +170,128 @@ func bindingExists(ctx context.Context, repo, change string) (bool, error) {
 	return err == nil, err
 }
 
-func verifyBindingLedger(root, change string, findings []reviewtransaction.Finding) error {
-	payload, err := os.ReadFile(filepath.Join(root, "openspec", "changes", change, "reviews", "ledger.json"))
+func resolveBindingChangeRoot(root, workspace, change string) (string, error) {
+	workspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", err
+	}
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return "", err
+	}
+	root = filepath.Clean(root)
+	workspace = filepath.Clean(workspace)
+	if !pathWithinBindingRoot(root, workspace) {
+		return "", errors.New("planning workspace is outside selected repository")
+	}
+
+	planningRoot := ""
+	for current := workspace; pathWithinBindingRoot(root, current); current = filepath.Dir(current) {
+		openspecRoot := filepath.Join(current, "openspec")
+		info, statErr := os.Stat(openspecRoot)
+		if statErr == nil {
+			if !info.IsDir() {
+				return "", errors.New("selected OpenSpec root is not a directory")
+			}
+			resolved, resolveErr := filepath.EvalSymlinks(openspecRoot)
+			if resolveErr != nil {
+				return "", resolveErr
+			}
+			resolved = filepath.Clean(resolved)
+			if !pathWithinBindingRoot(root, resolved) {
+				return "", errors.New("selected OpenSpec root resolves outside repository")
+			}
+			if resolved != filepath.Clean(openspecRoot) {
+				return "", errors.New("selected OpenSpec root uses a symlinked path")
+			}
+			planningRoot = current
+			break
+		} else if !os.IsNotExist(statErr) {
+			return "", statErr
+		}
+		if current == root {
+			break
+		}
+	}
+	if planningRoot == "" {
+		return "", errors.New("selected OpenSpec change does not exist")
+	}
+	candidate := filepath.Join(planningRoot, "openspec", "changes", change)
+	info, err := os.Stat(candidate)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", errors.New("selected OpenSpec change does not exist")
+		}
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("selected OpenSpec change is not a directory")
+	}
+	selected, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", err
+	}
+	selected = filepath.Clean(selected)
+	if !pathWithinBindingRoot(root, selected) {
+		return "", errors.New("selected OpenSpec change resolves outside repository")
+	}
+	if selected != filepath.Clean(candidate) {
+		return "", errors.New("selected OpenSpec change uses a symlinked path")
+	}
+
+	matches, err := bindingChangeRoots(root, change)
+	if err != nil {
+		return "", err
+	}
+	if len(matches) != 1 || matches[0] != selected {
+		return "", errors.New("selected OpenSpec change is ambiguous within repository")
+	}
+	return selected, nil
+}
+
+func bindingChangeRoots(root, change string) ([]string, error) {
+	matches := []string{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() && entry.Name() == ".git" && path != root {
+			return filepath.SkipDir
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.Name() == "openspec" {
+				candidate := filepath.Join(path, "changes", change)
+				if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+					matches = append(matches, candidate)
+				} else if err != nil && !os.IsNotExist(err) {
+					return err
+				}
+			} else if isBindingChangePath(path, change) {
+				matches = append(matches, path)
+			}
+			return nil
+		}
+		if !entry.IsDir() || !isBindingChangePath(path, change) {
+			return nil
+		}
+		matches = append(matches, filepath.Clean(path))
+		return filepath.SkipDir
+	})
+	return matches, err
+}
+
+func isBindingChangePath(path, change string) bool {
+	changesRoot := filepath.Dir(path)
+	return filepath.Base(path) == change && filepath.Base(changesRoot) == "changes" && filepath.Base(filepath.Dir(changesRoot)) == "openspec"
+}
+
+func pathWithinBindingRoot(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
+}
+
+func verifyBindingLedger(changeRoot string, findings []reviewtransaction.Finding) error {
+	payload, err := os.ReadFile(filepath.Join(changeRoot, "reviews", "ledger.json"))
 	if os.IsNotExist(err) {
 		return nil
 	}
